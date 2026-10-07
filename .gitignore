@@ -23,6 +23,7 @@ bayesdecay_activity.png
 bayesdecay_convergence.png
 bayesdecay_posteriors.png
 bayesdecay_results.csv
+dev/output/
 
 # Pre-refactor single-script version, kept locally for reference only
 legacy/
