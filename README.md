@@ -151,7 +151,7 @@ Each run produces:
 ## Development
 
 ```bash
-git clone https://github.com/romain-coulon/bayesdecay.git
+git clone https://github.com/RomainCoulon/bayesdecay.git
 cd bayesdecay
 pip install -e ".[test]"
 pytest
