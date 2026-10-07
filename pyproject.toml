@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bayesdecay"
+version = "0.1.0"
+description = "Bayesian estimation of radioactive half-life, activity, and background from counting data, with dead-time correction."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Romain Coulon", email = "romain.coulon2@gmail.com" }]
+keywords = [
+    "radioactivity",
+    "half-life",
+    "bayesian-inference",
+    "dead-time",
+    "nuclear-counting",
+    "metrology",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "matplotlib>=3.5",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/romain-coulon/bayesdecay"
+Issues = "https://github.com/romain-coulon/bayesdecay/issues"
+
+[project.scripts]
+bayesdecay = "bayesdecay.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

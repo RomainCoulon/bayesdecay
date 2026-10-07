@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+.conda/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated run outputs (figures, result tables) -- not source, don't track by default
+bayesdecay_activity.png
+bayesdecay_convergence.png
+bayesdecay_posteriors.png
+bayesdecay_results.csv
+
+# Pre-refactor single-script version, kept locally for reference only
+legacy/
+
+# Claude Code local state
+.claude/
