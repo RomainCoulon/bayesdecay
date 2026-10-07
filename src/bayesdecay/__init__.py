@@ -3,10 +3,17 @@ background from counting data (simulated or real list-mode timestamps), accounti
 for detector dead time (paralyzable or non-paralyzable).
 """
 
-from .deadtime import DEAD_TIME_MODELS, apply_deadtime, invert_deadtime
+from .deadtime import DEAD_TIME_MODELS, apply_deadtime, invert_deadtime, rate_transform
 from .fit import FitConfig, FitResult, fit
 from .io import load_timestamps, timestamps_to_binned
-from .model import auto_bin_count, bin_count_from_coarse_pass, expected_counts, loglinear_fit, simulate_binned
+from .model import (
+    auto_bin_count,
+    bin_count_from_coarse_pass,
+    expected_counts,
+    expected_observed_counts,
+    loglinear_fit,
+    simulate_binned,
+)
 from .priors import Priors, log_prior_background, log_prior_gaussian, log_prior_student_t
 from .report import check_consistency, format_summary_table, save_results_csv
 
@@ -17,6 +24,7 @@ __all__ = [
     "DEAD_TIME_MODELS",
     "apply_deadtime",
     "invert_deadtime",
+    "rate_transform",
     "FitConfig",
     "FitResult",
     "fit",
@@ -25,6 +33,7 @@ __all__ = [
     "auto_bin_count",
     "bin_count_from_coarse_pass",
     "expected_counts",
+    "expected_observed_counts",
     "loglinear_fit",
     "simulate_binned",
     "Priors",

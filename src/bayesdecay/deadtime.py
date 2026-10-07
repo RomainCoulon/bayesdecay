@@ -49,9 +49,30 @@ _RATE_FUNCS = {
 }
 
 
+def rate_transform(rate_true, tau_d, model="nonparalyzable"):
+    """The pointwise (instantaneous) dead-time rate transform underlying
+    :func:`apply_deadtime`, exposed directly for callers that need to apply it at
+    several sub-points within a time span rather than once to a single averaged rate
+    -- see :func:`bayesdecay.model.expected_observed_counts`, which uses this to
+    correct for the small bias from applying this NONLINEAR transform to a channel's
+    average rate instead of integrating it against the true, continuously
+    time-varying rate within the channel.
+    """
+    if model not in _RATE_FUNCS:
+        raise ValueError(f"Unknown dead-time model {model!r}; choose one of {DEAD_TIME_MODELS}")
+    return _RATE_FUNCS[model](np.asarray(rate_true, dtype=float), tau_d)
+
+
 def apply_deadtime(true_counts, width, tau_d, model="nonparalyzable"):
     """Convert true (dead-time-free) expected counts over a channel into the expected
     *observed* (dead-time-corrected) counts, under the chosen dead-time model.
+
+    This applies the (nonlinear) rate transform ONCE, to the channel's average true
+    rate (``true_counts / width``) -- exact if the true rate is constant across the
+    channel, and a good approximation when it varies little (see
+    :func:`bayesdecay.model.auto_bin_count`). For a more accurate treatment when the
+    rate varies non-negligibly within the channel, see
+    :func:`bayesdecay.model.expected_observed_counts`.
 
     Parameters
     ----------
@@ -64,10 +85,8 @@ def apply_deadtime(true_counts, width, tau_d, model="nonparalyzable"):
     model : {"nonparalyzable", "paralyzable"}
         Which dead-time model to apply.
     """
-    if model not in _RATE_FUNCS:
-        raise ValueError(f"Unknown dead-time model {model!r}; choose one of {DEAD_TIME_MODELS}")
     rate_true = true_counts / width
-    rate_obs = _RATE_FUNCS[model](rate_true, tau_d)
+    rate_obs = rate_transform(rate_true, tau_d, model=model)
     return rate_obs * width
 
 

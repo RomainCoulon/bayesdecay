@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from .deadtime import apply_deadtime, invert_deadtime
+from .deadtime import apply_deadtime, invert_deadtime, rate_transform
+
+_GL_CACHE = {}
+
+
+def _gauss_legendre(n):
+    """Gauss-Legendre nodes/weights on [-1, 1], cached (there are only a handful of
+    distinct ``n_quad`` values any caller will ever pass)."""
+    if n not in _GL_CACHE:
+        _GL_CACHE[n] = np.polynomial.legendre.leggauss(n)
+    return _GL_CACHE[n]
 
 
 def expected_counts(A0, lam, B, t_start, t_end):
@@ -13,19 +23,71 @@ def expected_counts(A0, lam, B, t_start, t_end):
     return (A0 / lam) * (np.exp(-lam * t_start) - np.exp(-lam * t_end)) + B * (t_end - t_start)
 
 
-def simulate_binned(A0, lam, B, t_max, tau_d, n_bins, dead_time_model="nonparalyzable", rng=None):
+def expected_observed_counts(A0, lam, B, t_start, t_end, tau_d, model="nonparalyzable", n_quad=1):
+    """Expected OBSERVED (dead-time-corrected) counts per channel.
+
+    With ``n_quad=1`` (the default), this is exactly ``apply_deadtime(expected_counts(...))``
+    -- the channel's average true rate, dead-time-corrected once -- at zero extra
+    cost over calling those two directly.
+
+    The dead-time rate transform (:func:`bayesdecay.deadtime.rate_transform`) is
+    NONLINEAR, so applying it once to a channel's *average* rate is not exactly the
+    same as integrating it against the true, continuously time-varying rate within
+    the channel: a small, systematic (Jensen's-inequality-style) bias that
+    :func:`bayesdecay.model.auto_bin_count` keeps negligible for typical use by
+    bounding the per-channel rate change, but which can become statistically
+    resolvable at very high count rates/statistics. ``n_quad>1`` corrects for this by
+    evaluating the rate transform at ``n_quad`` Gauss-Legendre sub-points within each
+    channel and integrating those instead -- trading ``n_quad``-times the rate-
+    transform evaluations (this is called inside the hot per-channel loops in
+    :mod:`bayesdecay.fit`) for reduced bias. A modest value (3-5) is normally enough,
+    since the per-channel rate change is already kept small by construction.
+    """
+    if n_quad <= 1:
+        mu_true = expected_counts(A0, lam, B, t_start, t_end)
+        width = np.asarray(t_end) - np.asarray(t_start)
+        return apply_deadtime(mu_true, width, tau_d, model=model)
+
+    nodes, weights = _gauss_legendre(n_quad)
+    t_start = np.asarray(t_start, dtype=float)
+    t_end = np.asarray(t_end, dtype=float)
+    half = 0.5 * (t_end - t_start)
+    mid = 0.5 * (t_end + t_start)
+    t_sub = mid[..., None] + half[..., None] * nodes  # (..., n_quad)
+
+    A0b = np.asarray(A0, dtype=float)[..., None]
+    lamb = np.asarray(lam, dtype=float)[..., None]
+    Bb = np.asarray(B, dtype=float)[..., None]
+    rate_true_sub = A0b * np.exp(-lamb * t_sub) + Bb
+    rate_obs_sub = rate_transform(rate_true_sub, tau_d, model=model)
+
+    # Gauss-Legendre weights on [-1, 1] sum to 2, so this is the weighted average.
+    rate_obs_avg = np.sum(rate_obs_sub * weights, axis=-1) / 2.0
+    width = t_end - t_start
+    return rate_obs_avg * width
+
+
+def simulate_binned(
+    A0, lam, B, t_max, tau_d, n_bins, dead_time_model="nonparalyzable", rng=None, quadrature_points=1
+):
     """Simulate binned (histogrammed) counts directly, without enumerating individual
     events. Cost is O(n_bins), independent of the total number of counts -- this is
     what makes the estimator usable for measurements spanning hours or days, where
     enumerating every event would be computationally prohibitive.
+
+    ``quadrature_points`` (see :func:`expected_observed_counts`) controls how
+    precisely the dead-time correction accounts for the rate varying within each
+    channel; the default (1) matches the fitter's own default, so simulated and
+    fitted data use the same approximation unless you deliberately raise this (e.g.
+    to check how a higher-fidelity "ground truth" affects recovered parameters).
     """
     rng = np.random.default_rng() if rng is None else rng
     bin_edges = np.linspace(0.0, t_max, n_bins + 1)
     t_start, t_end = bin_edges[:-1], bin_edges[1:]
-    width = t_end - t_start
 
-    mu_true = expected_counts(A0, lam, B, t_start, t_end)
-    mu_obs = apply_deadtime(mu_true, width, tau_d, model=dead_time_model)
+    mu_obs = expected_observed_counts(
+        A0, lam, B, t_start, t_end, tau_d, model=dead_time_model, n_quad=quadrature_points
+    )
     counts = rng.poisson(mu_obs)
     return bin_edges, counts
 

@@ -32,6 +32,14 @@ def _common_fit_args(parser):
     parser.add_argument("--prior-df", type=float, default=4.0, help="Degrees of freedom of the Student-t prior on A0/T1/2 -- lower is less informative (heavier tails), higher approaches a Gaussian (default: 4.0).")
     parser.add_argument("--n-checkpoints", type=int, default=20, help="Number of points in the convergence trace (default: 20).")
     parser.add_argument("--n-is-samples", type=int, default=100_000, help="Importance-sampling draws for marginal smoothing (default: 100000).")
+    parser.add_argument(
+        "--quadrature-points", type=int, default=1,
+        help="Sub-channel quadrature points for the dead-time correction (default: 1, i.e. off). "
+             "The dead-time correction is nonlinear, so applying it once to each channel's "
+             "average rate (the default) carries a small systematic bias that only becomes "
+             "visible at very high statistics (millions of counts); set this to 3-5 to correct "
+             "for it, at roughly that much extra compute cost in the grid/importance-sampling steps.",
+    )
     parser.add_argument("--output-dir", default=".", help="Directory to write figures and the results CSV into (default: current directory).")
     parser.add_argument("--no-plots", action="store_true", help="Skip generating and saving figures.")
     parser.add_argument("--show", action="store_true", help="Display figures interactively (in addition to saving them).")
@@ -43,6 +51,7 @@ def _config_from_args(args):
         dead_time_model=args.dead_time_model,
         n_checkpoints=args.n_checkpoints,
         n_is_samples=args.n_is_samples,
+        quadrature_points=args.quadrature_points,
         priors=Priors(b_prior_scale=args.b_prior_scale, prior_widen_k=args.prior_widen_k, prior_df=args.prior_df),
     )
 
@@ -109,7 +118,7 @@ def _cmd_simulate(args):
         print("[2/3] Simulating binned counting data...")
     bin_edges, counts = simulate_binned(
         args.a0, lam, args.background, args.acquisition_time, args.dead_time, n_bins,
-        dead_time_model=args.dead_time_model, rng=rng,
+        dead_time_model=args.dead_time_model, rng=rng, quadrature_points=args.quadrature_points,
     )
     print(f"Channels: {n_bins}, total simulated counts: {counts.sum()}")
 

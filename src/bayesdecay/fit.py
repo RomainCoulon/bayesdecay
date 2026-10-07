@@ -29,8 +29,7 @@ from scipy.optimize import minimize
 from scipy.stats import gaussian_kde, multivariate_normal
 from tqdm import tqdm
 
-from .deadtime import apply_deadtime
-from .model import expected_counts, loglinear_fit
+from .model import expected_observed_counts, loglinear_fit
 from .priors import Priors, log_prior_background, log_prior_student_t
 
 
@@ -42,6 +41,8 @@ class FitConfig:
     edge_mass_tol: float = 1e-4   # local-grid widening stop criterion
     max_widen: int = 6            # max local-grid widening attempts
     n_is_samples: int = 100_000   # importance-sampling draws for marginal smoothing
+    quadrature_points: int = 1    # >1 corrects the per-channel dead-time averaging bias
+    # (see model.expected_observed_counts); 1 = today's exact behaviour, no extra cost.
     priors: Priors = field(default_factory=Priors)
 
 
@@ -142,13 +143,15 @@ class FitResult:
         return per_param
 
 
-def neg_log_posterior(params, t_s, t_e, w, n, tau_d, dead_time_model, A0_mean, A0_sigma, t12_mean, t12_sigma, priors):
+def neg_log_posterior(
+    params, t_s, t_e, n, tau_d, dead_time_model, quadrature_points,
+    A0_mean, A0_sigma, t12_mean, t12_sigma, priors,
+):
     A0, half_life, B = params
     if A0 <= 0 or half_life <= 0 or B < 0:
         return np.inf
     lam = np.log(2) / half_life
-    mu_true = expected_counts(A0, lam, B, t_s, t_e)
-    mu = apply_deadtime(mu_true, w, tau_d, model=dead_time_model)
+    mu = expected_observed_counts(A0, lam, B, t_s, t_e, tau_d, model=dead_time_model, n_quad=quadrature_points)
     # Floor away from exactly 0: with the paralyzable model (which is not monotonic in
     # the true rate, see deadtime.py) the optimizer's numerical-gradient probing can
     # occasionally land on a combination that underflows mu to 0.0, which would
@@ -235,7 +238,7 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
 
     # -- MAP point estimate -----------------------------------------------------------
     args_full = (
-        t_start, t_end, bin_width, counts, tau_d, config.dead_time_model,
+        t_start, t_end, counts, tau_d, config.dead_time_model, config.quadrature_points,
         A0_lin, A0_prior_sigma, t12_lin, t12_prior_sigma, priors,
     )
     res = _fit_map([A0_lin, t12_lin, B_lin], args_full, bounds)
@@ -250,7 +253,7 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
             tau_d=tau_d, dead_time_model=config.dead_time_model,
         )
         args_k = (
-            t_start[:k], t_end[:k], bin_width[:k], counts[:k], tau_d, config.dead_time_model,
+            t_start[:k], t_end[:k], counts[:k], tau_d, config.dead_time_model, config.quadrature_points,
             A0_k, priors.prior_widen_k * sigma_A0_k, t12_k, priors.prior_widen_k * sigma_t12_k, priors,
         )
         res_k = _fit_map([A0_k, t12_k, 0.0], args_k, bounds)
@@ -274,8 +277,10 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         posterior = np.exp(log_prior - np.max(log_prior))
         posterior /= np.sum(posterior)
         for i in tqdm(range(n_bins), desc=desc, unit="channel", leave=False, disable=not show_progress):
-            mu_true_grid = expected_counts(AA, LL, BB, t_start[i], t_end[i])
-            mu_grid = apply_deadtime(mu_true_grid, bin_width[i], tau_d, model=config.dead_time_model)
+            mu_grid = expected_observed_counts(
+                AA, LL, BB, t_start[i], t_end[i], tau_d,
+                model=config.dead_time_model, n_quad=config.quadrature_points,
+            )
             mu_grid = np.maximum(mu_grid, 1e-300)  # A0 can sit at the grid's lower edge (0)
             log_likelihood = counts[i] * np.log(mu_grid) - mu_grid
             log_posterior = np.log(posterior + 1e-300) + log_likelihood
@@ -335,8 +340,10 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
                 continue
             av, tv, bv = a[valid], t[valid], b[valid]
             lam = np.log(2) / tv
-            mu_true = expected_counts(av[:, None], lam[:, None], bv[:, None], t_start[None, :], t_end[None, :])
-            mu = apply_deadtime(mu_true, bin_width[None, :], tau_d, model=config.dead_time_model)
+            mu = expected_observed_counts(
+                av[:, None], lam[:, None], bv[:, None], t_start[None, :], t_end[None, :], tau_d,
+                model=config.dead_time_model, n_quad=config.quadrature_points,
+            )
             mu = np.maximum(mu, 1e-300)
             ll = (
                 np.sum(counts[None, :] * np.log(mu) - mu, axis=1)
