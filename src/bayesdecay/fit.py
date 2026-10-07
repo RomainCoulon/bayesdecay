@@ -39,7 +39,8 @@ class FitConfig:
     n_checkpoints: int = 20       # number of points in the convergence trace
     n_vis: int = 61               # local covariance grid resolution per dimension
     edge_mass_tol: float = 1e-4   # local-grid widening stop criterion
-    max_widen: int = 6            # max local-grid widening attempts
+    max_widen: int = 10           # max local-grid widen/shrink attempts
+    min_effective_fraction: float = 0.25  # local-grid shrinking stop criterion (see fit())
     n_is_samples: int = 100_000   # importance-sampling draws for marginal smoothing
     quadrature_points: int = 1    # >1 corrects the per-channel dead-time averaging bias
     # (see model.expected_observed_counts); 1 = today's exact behaviour, no extra cost.
@@ -294,6 +295,36 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         hi_bad = p[-1] > config.edge_mass_tol
         return lo_bad or hi_bad
 
+    def effective_points(p):
+        """Participation ratio (inverse Simpson index) of a normalized marginal
+        pmf: how many of the n_vis grid cells meaningfully carry posterior mass.
+        A window much wider than the TRUE posterior passes edge_mass_bad trivially
+        (both tails are ~0) while still being badly under-resolved -- almost all of
+        the mass piles onto a handful of cells near the centre, and the resulting
+        second-moment (variance) integral underestimates the true posterior width.
+        edge_mass_bad alone can't see this: it only ever looks at the two end
+        cells, not how concentrated the mass is in between."""
+        p = p / p.sum()
+        return 1.0 / np.sum(p * p)
+
+    min_effective = config.min_effective_fraction * config.n_vis
+
+    def adjust_half(half, marg, grid, floor):
+        """One step of bidirectional window sizing for a single dimension: widen
+        (double) if the posterior's tails spill past the window edges, else shrink
+        (toward the window that would hit exactly min_effective) if the grid is
+        under-resolving a posterior narrower than the window, else leave it alone.
+        Shrinking targets n_eff/half ~ constant (true for a posterior whose shape
+        stays fixed while only the window/grid-spacing changes), with the per-step
+        ratio floored at 0.1 so one badly-under-resolved pass doesn't overshoot into
+        a too-narrow window and start oscillating with the widen branch."""
+        if edge_mass_bad(marg, grid, floor):
+            return half * 2.0, True
+        n_eff = effective_points(marg)
+        if n_eff < min_effective:
+            return half * max(n_eff / min_effective, 0.1), True
+        return half, False
+
     half_A0 = max(0.05 * A0_final, 10.0)
     half_t12 = max(0.05 * t12_final, 1.0)
     half_B = max(0.5 * B_final + 10.0, 10.0)
@@ -305,16 +336,14 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         marg_A0 = posterior.sum(axis=(1, 2))
         marg_t12 = posterior.sum(axis=(0, 2))
         marg_B = posterior.sum(axis=(0, 1))
-        if not (
-            edge_mass_bad(marg_A0, grid_A0, 0.0)
-            or edge_mass_bad(marg_t12, grid_t12, 0.0)
-            or edge_mass_bad(marg_B, grid_B, 0.0)
-        ):
+
+        half_A0, changed_A0 = adjust_half(half_A0, marg_A0, grid_A0, 0.0)
+        half_t12, changed_t12 = adjust_half(half_t12, marg_t12, grid_t12, 0.0)
+        half_B, changed_B = adjust_half(half_B, marg_B, grid_B, 0.0)
+
+        if not (changed_A0 or changed_t12 or changed_B):
             converged = True
             break
-        half_A0 *= 2
-        half_t12 *= 2
-        half_B *= 2
 
     dA0, dT12, dB = AA - A0_final, TT - t12_final, BB - B_final
     cov = np.empty((3, 3))
