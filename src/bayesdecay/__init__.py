@@ -7,8 +7,8 @@ from .deadtime import DEAD_TIME_MODELS, apply_deadtime
 from .fit import FitConfig, FitResult, fit
 from .io import load_timestamps, timestamps_to_binned
 from .model import auto_bin_count, bin_count_from_coarse_pass, expected_counts, loglinear_fit, simulate_binned
-from .priors import Priors, log_prior_background, log_prior_gaussian
-from .report import format_summary_table, save_results_csv
+from .priors import Priors, log_prior_background, log_prior_gaussian, log_prior_student_t
+from .report import check_consistency, format_summary_table, save_results_csv
 
 __version__ = "0.1.0"
 
@@ -29,6 +29,8 @@ __all__ = [
     "Priors",
     "log_prior_background",
     "log_prior_gaussian",
+    "log_prior_student_t",
+    "check_consistency",
     "format_summary_table",
     "save_results_csv",
 ]

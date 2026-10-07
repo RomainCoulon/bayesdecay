@@ -48,10 +48,16 @@ Fitting a decaying count rate sounds simple until you need to do it properly:
    gives smooth marginal posterior plots and an empirical (non-Gaussian) 95% credible
    interval for each parameter.
 
-Priors: A0 and T1/2 get a weakly-informative Gaussian prior centred on the
-log-linear fit, with width equal to 5× its own regression standard error (a safety
-net, not a strong constraint). Background B gets an exponential prior — its mode is
-exactly zero, matching "B is probably negligible" while still letting a real
+Priors: A0 and T1/2 get a weakly-informative **Student-t** prior centred on the
+log-linear fit, with scale equal to 5× its own regression standard error and 4
+degrees of freedom by default (`--prior-widen-k`, `--prior-df`). A Student-t rather
+than a Gaussian: a Gaussian's tails decay exponentially, so even a "wide" one
+resists the data with rapidly growing force the farther the MAP sits from the prior
+mean — a Student-t's tails decay only polynomially, so it still discourages the
+optimizer from wandering to implausible values in a poorly-conditioned regime,
+without fighting the likelihood once the data are actually informative. Background B
+gets an exponential prior — its mode is exactly zero, matching "B is probably
+negligible" while still letting a real
 background win if the data indicate one.
 
 ## Installation

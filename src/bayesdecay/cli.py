@@ -16,7 +16,7 @@ from .io import TIMESTAMP_UNITS, load_timestamps, timestamps_to_binned
 from .model import auto_bin_count, simulate_binned
 from .plotting import plot_activity, plot_convergence, plot_posteriors
 from .priors import Priors
-from .report import format_summary_table, save_results_csv
+from .report import check_consistency, format_summary_table, save_results_csv
 
 
 def _common_fit_args(parser):
@@ -28,7 +28,8 @@ def _common_fit_args(parser):
              "or not, restarts the dead period). Default: nonparalyzable.",
     )
     parser.add_argument("--b-prior-scale", type=float, default=5.0, help="Mean of the exponential prior on background B, in cps (default: 5.0).")
-    parser.add_argument("--prior-widen-k", type=float, default=5.0, help="Widening factor applied to the log-linear regression SE for the A0/T1/2 prior (default: 5.0).")
+    parser.add_argument("--prior-widen-k", type=float, default=5.0, help="Widening factor applied to the log-linear regression SE for the A0/T1/2 prior scale (default: 5.0).")
+    parser.add_argument("--prior-df", type=float, default=4.0, help="Degrees of freedom of the Student-t prior on A0/T1/2 -- lower is less informative (heavier tails), higher approaches a Gaussian (default: 4.0).")
     parser.add_argument("--n-checkpoints", type=int, default=20, help="Number of points in the convergence trace (default: 20).")
     parser.add_argument("--n-is-samples", type=int, default=100_000, help="Importance-sampling draws for marginal smoothing (default: 100000).")
     parser.add_argument("--output-dir", default=".", help="Directory to write figures and the results CSV into (default: current directory).")
@@ -42,7 +43,7 @@ def _config_from_args(args):
         dead_time_model=args.dead_time_model,
         n_checkpoints=args.n_checkpoints,
         n_is_samples=args.n_is_samples,
-        priors=Priors(b_prior_scale=args.b_prior_scale, prior_widen_k=args.prior_widen_k),
+        priors=Priors(b_prior_scale=args.b_prior_scale, prior_widen_k=args.prior_widen_k, prior_df=args.prior_df),
     )
 
 
@@ -63,6 +64,8 @@ def _report_and_plot(result, bin_edges, counts, t_max, args, true_values=None):
             "reported uncertainties may be truncated. Consider relaxing the defaults "
             "in FitConfig if you are using the library API."
         )
+    for warning in check_consistency(result):
+        print(f"WARNING: {warning}")
 
     if args.no_plots:
         return

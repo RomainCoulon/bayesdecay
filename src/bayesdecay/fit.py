@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 from .deadtime import apply_deadtime
 from .model import expected_counts, loglinear_fit
-from .priors import Priors, log_prior_background, log_prior_gaussian
+from .priors import Priors, log_prior_background, log_prior_student_t
 
 
 @dataclass
@@ -119,8 +119,8 @@ def neg_log_posterior(params, t_s, t_e, w, n, tau_d, dead_time_model, A0_mean, A
     mu = np.maximum(mu, 1e-300)
     neg_loglik = -np.sum(n * np.log(mu) - mu)
     log_prior_total = (
-        log_prior_gaussian(A0, A0_mean, A0_sigma)
-        + log_prior_gaussian(half_life, t12_mean, t12_sigma)
+        log_prior_student_t(A0, A0_mean, A0_sigma, priors.prior_df)
+        + log_prior_student_t(half_life, t12_mean, t12_sigma, priors.prior_df)
         + log_prior_background(B, priors.b_prior_scale)
     )
     return neg_loglik - log_prior_total
@@ -129,13 +129,22 @@ def neg_log_posterior(params, t_s, t_e, w, n, tau_d, dead_time_model, A0_mean, A
 def _fit_map(x0, args, bounds):
     """Multi-start MAP search: with strongly correlated parameters (e.g. an
     acquisition time on the order of one half-life), a single local optimizer run can
-    get stuck on a near-flat likelihood plateau near its starting point. Restarting
-    from a few plausible background guesses and keeping the best (lowest
-    negative-log-posterior) result guards against that."""
+    get stuck on a near-flat likelihood plateau near its starting point. We restart
+    from several plausible background guesses AND, since A0 and half-life trade off
+    against each other along that same near-flat ridge, from a couple of points
+    nudged in opposite directions along it too -- varying only B is not always enough
+    to escape it (a weakly-informative prior, by design, does not do much of that
+    escaping for us). Keep whichever restart reaches the lowest negative-log-posterior."""
     A0_0, t12_0, B_0 = x0
-    candidates = [B_0, 0.1 * A0_0, 0.02 * A0_0]
+    candidates = [
+        (A0_0, t12_0, B_0),
+        (A0_0, t12_0, 0.1 * A0_0),
+        (A0_0, t12_0, 0.02 * A0_0),
+        (A0_0 * 1.1, t12_0 * 0.9, B_0),
+        (A0_0 * 0.9, t12_0 * 1.1, B_0),
+    ]
     return min(
-        (minimize(neg_log_posterior, [A0_0, t12_0, b], args=args, method="L-BFGS-B", bounds=bounds) for b in candidates),
+        (minimize(neg_log_posterior, list(c), args=args, method="L-BFGS-B", bounds=bounds) for c in candidates),
         key=lambda r: r.fun,
     )
 
@@ -220,8 +229,8 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         AA, TT, BB = np.meshgrid(A0_grid, t12_grid, B_grid, indexing="ij")
         LL = np.log(2) / TT
         log_prior = (
-            log_prior_gaussian(AA, A0_lin, A0_prior_sigma)
-            + log_prior_gaussian(TT, t12_lin, t12_prior_sigma)
+            log_prior_student_t(AA, A0_lin, A0_prior_sigma, priors.prior_df)
+            + log_prior_student_t(TT, t12_lin, t12_prior_sigma, priors.prior_df)
             + log_prior_background(BB, priors.b_prior_scale)
         )
         posterior = np.exp(log_prior - np.max(log_prior))
@@ -293,8 +302,8 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
             mu = np.maximum(mu, 1e-300)
             ll = (
                 np.sum(counts[None, :] * np.log(mu) - mu, axis=1)
-                + log_prior_gaussian(av, A0_lin, A0_prior_sigma)
-                + log_prior_gaussian(tv, t12_lin, t12_prior_sigma)
+                + log_prior_student_t(av, A0_lin, A0_prior_sigma, priors.prior_df)
+                + log_prior_student_t(tv, t12_lin, t12_prior_sigma, priors.prior_df)
                 + log_prior_background(bv, priors.b_prior_scale)
             )
             tmp = out[sl]

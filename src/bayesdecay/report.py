@@ -88,6 +88,45 @@ def format_summary_table(result, true_values=None):
     return "\n".join(lines)
 
 
+def check_consistency(result):
+    """Sanity-check the MAP point estimates against their own 95% credible intervals.
+
+    In a well-behaved fit the point estimate sits comfortably inside its interval.
+    If it does not, that is a sign the posterior is not well approximated by the local
+    Gaussian used to build the importance-sampling proposal (or that the MAP
+    optimizer landed on a different, poorer local mode) -- most likely in a severely
+    poorly-conditioned fit (e.g. an acquisition time only on the order of one
+    half-life). Returns a list of human-readable warning strings (empty if nothing
+    looks off).
+
+    All three parameters have a physical floor at 0. When a point estimate sits
+    exactly at (or essentially at) that floor -- the expected, healthy outcome when a
+    parameter is legitimately consistent with zero, background most commonly -- its
+    empirical credible interval's lower bound naturally lands a little above 0 (a
+    one-sided pile-up at a hard boundary); that is not a sign of a poor fit, so the
+    LOWER bound is not checked in that case.
+    """
+    warnings = []
+    checks = [
+        ("A0", result.A0, result.A0_ci95),
+        ("half_life", result.half_life, result.half_life_ci95),
+        ("background", result.background, result.background_ci95),
+    ]
+    for name, value, ci in checks:
+        at_floor = value <= 1e-9
+        low_bad = not at_floor and value < ci[0]
+        high_bad = value > ci[1]
+        if low_bad or high_bad:
+            warnings.append(
+                f"{name}: the MAP point estimate ({value:.4g}) falls outside its own 95% "
+                f"credible interval ({ci[0]:.4g}, {ci[1]:.4g}). The fit may be poorly "
+                "conditioned (e.g. an acquisition time only on the order of one "
+                "half-life) -- consider a tighter prior (higher --prior-df or lower "
+                "--prior-widen-k) or a longer acquisition."
+            )
+    return warnings
+
+
 def save_results_csv(result, path, true_values=None):
     """Write the raw numeric values behind :func:`format_summary_table` to a CSV file
     (one row per parameter), for downstream use in a spreadsheet or another script."""
