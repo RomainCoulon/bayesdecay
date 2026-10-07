@@ -80,6 +80,7 @@ def load_timestamps(path, column=None, unit="seconds", delimiter=","):
 def timestamps_to_binned(
     timestamps, t_max=None, n_bins=None,
     rate_change_tol=0.01, n_bins_prelim=200, n_bins_min=200, n_bins_max=20_000,
+    tau_d=0.0, dead_time_model="nonparalyzable",
 ):
     """Histogram a sorted array of event timestamps (seconds) into fixed-width channels.
 
@@ -97,6 +98,10 @@ def timestamps_to_binned(
         Acquisition duration. Defaults to the last timestamp.
     n_bins : int, optional
         Fixed channel count; if omitted, chosen automatically (recommended).
+    tau_d, dead_time_model
+        Passed to the preliminary log-linear fit so its half-life estimate is
+        dead-time-corrected (see :func:`bayesdecay.model.loglinear_fit`) -- only
+        used when ``n_bins`` is being chosen automatically.
 
     Returns
     -------
@@ -115,7 +120,8 @@ def timestamps_to_binned(
         centers_prelim = 0.5 * (edges_prelim[:-1] + edges_prelim[1:])
         width_prelim = np.diff(edges_prelim)
         n_bins, half_life_prelim = bin_count_from_coarse_pass(
-            centers_prelim, counts_prelim, width_prelim, t_max, rate_change_tol, n_bins_min, n_bins_max
+            centers_prelim, counts_prelim, width_prelim, t_max, rate_change_tol, n_bins_min, n_bins_max,
+            tau_d=tau_d, dead_time_model=dead_time_model,
         )
 
     bin_edges = np.linspace(0.0, t_max, n_bins + 1)

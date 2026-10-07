@@ -99,12 +99,13 @@ def check_consistency(result):
     half-life). Returns a list of human-readable warning strings (empty if nothing
     looks off).
 
-    All three parameters have a physical floor at 0. When a point estimate sits
-    exactly at (or essentially at) that floor -- the expected, healthy outcome when a
-    parameter is legitimately consistent with zero, background most commonly -- its
-    empirical credible interval's lower bound naturally lands a little above 0 (a
-    one-sided pile-up at a hard boundary); that is not a sign of a poor fit, so the
-    LOWER bound is not checked in that case.
+    A violation smaller than a couple of percent of the interval's own width is not
+    flagged: the IS/KDE machinery behind the credible interval has some inherent
+    sampling noise of its own, and all three parameters have a physical floor at 0 --
+    when a point estimate legitimately sits at (or near) that floor, the empirical
+    interval's lower bound naturally lands a little above 0 (a one-sided pile-up at a
+    hard boundary), which is healthy, not a sign of a poor fit. A genuinely
+    poorly-conditioned fit misses by much more than that.
     """
     warnings = []
     checks = [
@@ -113,9 +114,9 @@ def check_consistency(result):
         ("background", result.background, result.background_ci95),
     ]
     for name, value, ci in checks:
-        at_floor = value <= 1e-9
-        low_bad = not at_floor and value < ci[0]
-        high_bad = value > ci[1]
+        tol = 0.02 * (ci[1] - ci[0])
+        low_bad = value < ci[0] - tol
+        high_bad = value > ci[1] + tol
         if low_bad or high_bad:
             warnings.append(
                 f"{name}: the MAP point estimate ({value:.4g}) falls outside its own 95% "

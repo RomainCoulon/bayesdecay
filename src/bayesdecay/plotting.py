@@ -87,15 +87,18 @@ def plot_activity(result, t_max, bin_edges, counts, true_values=None):
 
 def plot_convergence(result, true_values=None):
     """A0, T1/2, B re-estimated using only the first k channels, for growing k."""
+    cutoffs = result.convergence_cutoff()
     with plt.rc_context(_STYLE):
         fig, axes = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
 
         series = [
-            (result.trace_A0, "A0 (cps)", true_values.get("A0") if true_values else None),
-            (result.trace_half_life, "T1/2 (s)", true_values.get("half_life") if true_values else None),
-            (result.trace_background, "B (cps)", true_values.get("background") if true_values else None),
+            (result.trace_A0, "A0 (cps)", true_values.get("A0") if true_values else None, cutoffs["A0"]),
+            (result.trace_half_life, "T1/2 (s)", true_values.get("half_life") if true_values else None, cutoffs["half_life"]),
+            (result.trace_background, "B (cps)", true_values.get("background") if true_values else None, cutoffs["background"]),
         ]
-        for ax, (trace, ylabel, true_val) in zip(axes, series):
+        for ax, (trace, ylabel, true_val, cutoff) in zip(axes, series):
+            if cutoff is not None and cutoff > result.trace_t[0]:
+                ax.axvspan(result.trace_t[0], cutoff, color=COLOR_TICK, alpha=0.12, linewidth=0)
             ax.plot(result.trace_t, trace, color=COLOR_BLUE, linewidth=2)
             if true_val is not None:
                 ax.axhline(true_val, color=COLOR_TRUE, linestyle="--", linewidth=1.5)
@@ -104,6 +107,8 @@ def plot_convergence(result, true_values=None):
         title = "Convergence of the estimates"
         if true_values:
             title += " (dashed = true value)"
+        if cutoffs["overall"] is not None:
+            title += f"\nshaded = not yet within 3σ of the final estimate (settles at t={cutoffs['overall']:.3g} s)"
         axes[0].set_title(title)
         fig.tight_layout()
     return fig

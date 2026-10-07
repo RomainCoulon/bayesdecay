@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from bayesdecay.deadtime import apply_deadtime
 from bayesdecay.model import expected_counts, loglinear_fit, simulate_binned
 
 
@@ -52,3 +53,31 @@ def test_loglinear_fit_recovers_known_parameters_without_noise():
     assert B_hat == 0.0
     assert sigma_A0 >= 0
     assert sigma_t12 >= 0
+
+
+@pytest.mark.parametrize("dead_time_model", ["nonparalyzable", "paralyzable"])
+def test_loglinear_fit_dead_time_correction_removes_bias(dead_time_model):
+    # Even with zero background and zero noise, an UNCORRECTED log-linear fit on
+    # dead-time-thinned counts reads a smaller A0 and a shorter half-life than truth
+    # (dead-time losses are heaviest at the high rate right after t=0). Passing tau_d
+    # should correct this back to (near) the true values.
+    A0, half_life, tau_d = 50_000.0, 20.0, 20e-6  # high rate -> sizeable dead-time effect
+    lam = np.log(2) / half_life
+    edges = np.linspace(0.0, 200.0, 401)
+    t_start, t_end = edges[:-1], edges[1:]
+    width = t_end - t_start
+    centers = 0.5 * (t_start + t_end)
+
+    true_counts = expected_counts(A0, lam, 0.0, t_start, t_end)
+    observed_counts = apply_deadtime(true_counts, width, tau_d, model=dead_time_model)
+
+    A0_uncorrected, t12_uncorrected, *_ = loglinear_fit(centers, observed_counts, width, 200.0)
+    A0_corrected, t12_corrected, *_ = loglinear_fit(
+        centers, observed_counts, width, 200.0, tau_d=tau_d, dead_time_model=dead_time_model
+    )
+
+    assert A0_uncorrected < 0.95 * A0  # clearly biased low
+    assert A0_corrected == pytest.approx(A0, rel=1e-3)
+    assert t12_corrected == pytest.approx(half_life, rel=1e-3)
+    assert abs(A0_corrected - A0) < abs(A0_uncorrected - A0)
+    assert abs(t12_corrected - half_life) < abs(t12_uncorrected - half_life)

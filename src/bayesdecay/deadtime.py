@@ -30,6 +30,7 @@ for how the channel width is chosen to keep that assumption valid.
 from __future__ import annotations
 
 import numpy as np
+from scipy.special import lambertw
 
 DEAD_TIME_MODELS = ("nonparalyzable", "paralyzable")
 
@@ -68,3 +69,31 @@ def apply_deadtime(true_counts, width, tau_d, model="nonparalyzable"):
     rate_true = true_counts / width
     rate_obs = _RATE_FUNCS[model](rate_true, tau_d)
     return rate_obs * width
+
+
+def invert_deadtime(rate_obs, tau_d, model="nonparalyzable"):
+    """Invert :func:`apply_deadtime`'s rate transform: given an OBSERVED rate,
+    estimate the TRUE rate that produced it. Exact closed-form for both models:
+
+    - nonparalyzable: ``m = n/(1+n*tau_d)``  =>  ``n = m/(1 - m*tau_d)``.
+    - paralyzable: ``m = n*exp(-n*tau_d)``, inverted via the Lambert W function;
+      returns the physically relevant lower-rate branch (``n <= 1/tau_d``), which
+      covers every real counting setup -- these are never deliberately operated past
+      the "paralysis" rate where a detector effectively locks up.
+
+    Used only to de-bias the quick log-linear reference fit (see
+    :func:`bayesdecay.model.loglinear_fit`) -- the main Bayesian estimator always
+    works forward (true rate -> observed rate, via :func:`apply_deadtime`), so it
+    never needs this.
+    """
+    rate_obs = np.asarray(rate_obs, dtype=float)
+    if model == "nonparalyzable":
+        denom = np.maximum(1.0 - rate_obs * tau_d, 1e-9)
+        return rate_obs / denom
+    if model == "paralyzable":
+        # m*tau_d = x*exp(-x) with x = n*tau_d  =>  x = -W0(-m*tau_d).
+        # Clip to W0's real domain [-1/e, 0] to absorb tiny float overshoot right at
+        # the peak rate (or, for pathological inputs above it, saturate there).
+        z = np.clip(-rate_obs * tau_d, -1.0 / np.e, 0.0)
+        return -np.real(lambertw(z, k=0)) / tau_d
+    raise ValueError(f"Unknown dead-time model {model!r}; choose one of {DEAD_TIME_MODELS}")

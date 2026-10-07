@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .deadtime import apply_deadtime
+from .deadtime import apply_deadtime, invert_deadtime
 
 
 def expected_counts(A0, lam, B, t_start, t_end):
@@ -30,16 +30,29 @@ def simulate_binned(A0, lam, B, t_max, tau_d, n_bins, dead_time_model="nonparaly
     return bin_edges, counts
 
 
-def loglinear_fit(t_c, c, w, t_max_fallback):
+def loglinear_fit(t_c, c, w, t_max_fallback, tau_d=0.0, dead_time_model="nonparalyzable"):
     """Regress log(counts / channel width) against time, over non-empty channels.
 
-    Gives a fast estimate of ``(A0, half_life)`` that ignores BOTH dead time and the
-    background ``B`` (see the module-level comparison printed by the CLI). ``B`` is
-    deliberately not estimated here: a late-acquisition plateau only reflects a real
-    background once ``t_max`` extends well past the half-life -- when the acquisition
-    is only on the order of one half-life, the "tail" is still decaying, and reading a
-    plateau there would give an inflated, wrong background estimate. The full Bayesian
-    estimator (see :mod:`bayesdecay.fit`) recovers B properly from the data and prior.
+    Gives a fast estimate of ``(A0, half_life)`` that ignores the background ``B``
+    (see the module-level comparison printed by the CLI). ``B`` is deliberately not
+    estimated here: a late-acquisition plateau only reflects a real background once
+    ``t_max`` extends well past the half-life -- when the acquisition is only on the
+    order of one half-life, the "tail" is still decaying, and reading a plateau there
+    would give an inflated, wrong background estimate. The full Bayesian estimator
+    (see :mod:`bayesdecay.fit`) recovers B properly from the data and prior.
+
+    If ``tau_d`` > 0, the observed rate is first corrected back to an estimated TRUE
+    rate (:func:`bayesdecay.deadtime.invert_deadtime`) before the regression. Without
+    this, the fit is biased even with zero background: dead-time losses are
+    themselves rate-dependent (heaviest at the high rates right after t=0, tapering
+    off as the source decays), so a plain log-linear fit on the raw observed rate
+    systematically reads a smaller A0 and a shorter half-life than the truth -- the
+    decay looks artificially "faster" than it really is because the earliest,
+    highest-rate channels are disproportionately thinned by dead time. This also
+    matters for the Bayesian estimator: since this fit sets both its starting point
+    AND its prior centre, an uncorrected bias here otherwise has to be walked back by
+    the data alone, most visibly as a transient in the convergence trace during the
+    first few checkpoints (where there's not yet enough data to fully override it).
 
     Also returns the regression standard errors on A0 and half_life (propagated from
     the fitted-coefficient covariance, via ``numpy.polyfit(..., cov=True)`` and the
@@ -51,7 +64,14 @@ def loglinear_fit(t_c, c, w, t_max_fallback):
     A0_hat, half_life_hat, B_hat, sigma_A0, sigma_half_life
     """
     rate = c / w
-    valid = c > 0
+    if tau_d > 0:
+        rate = invert_deadtime(rate, tau_d, model=dead_time_model)
+    # Poisson noise on a channel can occasionally push its observed rate right to (or
+    # past, before clipping) the edge of a dead-time model's valid domain -- e.g. near
+    # the paralyzable model's peak rate 1/tau_d. invert_deadtime() clips rather than
+    # raising, but guard here too: exclude anything that still came out non-finite or
+    # non-positive, on top of the existing "non-empty channel" filter.
+    valid = (c > 0) & np.isfinite(rate) & (rate > 0)
     if valid.sum() < 3:
         a0_fallback = 0.5 * max(rate.max(), 1.0)
         return a0_fallback, t_max_fallback, 0.0, 0.5 * a0_fallback, 0.5 * t_max_fallback
@@ -97,10 +117,16 @@ def auto_bin_count(
     edges_prelim = np.linspace(0.0, t_max, n_bins_prelim + 1)
     tc_prelim = 0.5 * (edges_prelim[:-1] + edges_prelim[1:])
     w_prelim = np.diff(edges_prelim)
-    return bin_count_from_coarse_pass(tc_prelim, counts_prelim, w_prelim, t_max, rate_change_tol, n_bins_min, n_bins_max)
+    return bin_count_from_coarse_pass(
+        tc_prelim, counts_prelim, w_prelim, t_max, rate_change_tol, n_bins_min, n_bins_max,
+        tau_d=tau_d, dead_time_model=dead_time_model,
+    )
 
 
-def bin_count_from_coarse_pass(bin_centers, counts, bin_width, t_max, rate_change_tol=0.01, n_bins_min=200, n_bins_max=20_000):
+def bin_count_from_coarse_pass(
+    bin_centers, counts, bin_width, t_max, rate_change_tol=0.01, n_bins_min=200, n_bins_max=20_000,
+    tau_d=0.0, dead_time_model="nonparalyzable",
+):
     """Same channel-count rule as :func:`auto_bin_count`, but starting from an already
     binned coarse pass (real or simulated) rather than running a new simulation --
     used for real experimental data, where there is no "true" model to simulate from.
@@ -110,7 +136,9 @@ def bin_count_from_coarse_pass(bin_centers, counts, bin_width, t_max, rate_chang
     n_bins : int
     half_life_prelim : float
     """
-    _, half_life_prelim, *_ = loglinear_fit(bin_centers, counts, bin_width, t_max)
+    _, half_life_prelim, *_ = loglinear_fit(
+        bin_centers, counts, bin_width, t_max, tau_d=tau_d, dead_time_model=dead_time_model
+    )
     n_bins = int(np.clip(
         np.ceil(t_max * np.log(2) / (rate_change_tol * half_life_prelim)), n_bins_min, n_bins_max
     ))

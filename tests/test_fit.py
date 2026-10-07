@@ -42,6 +42,15 @@ def test_fit_recovers_known_parameters(dead_time_model):
     assert result.half_life_ci95[0] < half_life_true < result.half_life_ci95[1]
     assert len(result.trace_t) == len(result.trace_A0) == len(result.trace_half_life)
 
+    cutoffs = result.convergence_cutoff()
+    assert set(cutoffs) == {"A0", "half_life", "background", "overall"}
+    # The trace necessarily ENDS at the final estimate, so it must have "settled" by
+    # some point at or before the last checkpoint (possibly the first, if it was
+    # already within tolerance throughout) -- never later than the trace itself.
+    for key in ("A0", "half_life", "background", "overall"):
+        assert cutoffs[key] is not None
+        assert result.trace_t[0] <= cutoffs[key] <= result.trace_t[-1]
+
 
 def test_fit_dead_time_model_mismatch_biases_result():
     # Fitting with the WRONG dead-time model should introduce a detectable bias at a

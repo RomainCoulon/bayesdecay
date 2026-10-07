@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bayesdecay.deadtime import apply_deadtime
+from bayesdecay.deadtime import apply_deadtime, invert_deadtime
 
 
 @pytest.mark.parametrize("model", ["nonparalyzable", "paralyzable"])
@@ -42,3 +42,18 @@ def test_paralyzable_has_a_maximum_and_decreases_beyond_it():
 def test_unknown_model_raises():
     with pytest.raises(ValueError):
         apply_deadtime(np.array([1.0]), np.array([1.0]), tau_d=1e-6, model="not-a-model")
+
+
+@pytest.mark.parametrize("model", ["nonparalyzable", "paralyzable"])
+def test_invert_deadtime_is_the_exact_inverse_below_the_paralysis_rate(model):
+    tau_d = 1e-3
+    rates_true = np.array([1.0, 50.0, 200.0, 500.0, 900.0])  # all well below 1/tau_d = 1000
+    width = 1.0
+    observed = apply_deadtime(rates_true, width, tau_d, model=model) / width
+    recovered = invert_deadtime(observed, tau_d, model=model)
+    assert recovered == pytest.approx(rates_true, rel=1e-6)
+
+
+def test_invert_deadtime_unknown_model_raises():
+    with pytest.raises(ValueError):
+        invert_deadtime(np.array([1.0]), tau_d=1e-6, model="not-a-model")

@@ -3,7 +3,7 @@ background from counting data (simulated or real list-mode timestamps), accounti
 for detector dead time (paralyzable or non-paralyzable).
 """
 
-from .deadtime import DEAD_TIME_MODELS, apply_deadtime
+from .deadtime import DEAD_TIME_MODELS, apply_deadtime, invert_deadtime
 from .fit import FitConfig, FitResult, fit
 from .io import load_timestamps, timestamps_to_binned
 from .model import auto_bin_count, bin_count_from_coarse_pass, expected_counts, loglinear_fit, simulate_binned
@@ -16,6 +16,7 @@ __all__ = [
     "__version__",
     "DEAD_TIME_MODELS",
     "apply_deadtime",
+    "invert_deadtime",
     "FitConfig",
     "FitResult",
     "fit",

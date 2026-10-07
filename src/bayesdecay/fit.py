@@ -104,6 +104,43 @@ class FitResult:
         d_lam_d_t12 = -np.log(2) / self.half_life**2
         return abs(d_lam_d_t12) * self.u_half_life
 
+    def convergence_cutoff(self, n_sigma=3.0):
+        """Where the convergence trace (``trace_t``/``trace_A0``/...) has stabilized:
+        the earliest point from which EVERY later checkpoint stays within
+        ``n_sigma`` posterior standard deviations of the final estimate, for each of
+        A0, half-life, and background. Returns a dict with a time (in ``trace_t``'s
+        units, ``None`` if that parameter never stabilizes within the observed trace)
+        per parameter, plus ``"overall"`` = the latest of the three (the point by
+        which all three have settled).
+
+        This is a DISPLAY marker, not a data-truncation point. Unlike MCMC burn-in,
+        every checkpoint here is fit from genuinely valid data -- just a growing
+        amount of it -- so early, higher-variance points are not "wrong" samples to
+        discard before refitting; for this problem the earliest, highest-rate data is
+        usually the most informative for A0, so cutting it would typically only
+        throw that away rather than improve anything.
+        """
+        def cutoff_for(trace, final_value, sigma):
+            if sigma <= 0:
+                return float(self.trace_t[0])
+            within = np.abs(np.asarray(trace) - final_value) <= n_sigma * sigma
+            bad = np.where(~within)[0]
+            if len(bad) == 0:
+                return float(self.trace_t[0])
+            last_bad = bad[-1]
+            if last_bad + 1 >= len(self.trace_t):
+                return None
+            return float(self.trace_t[last_bad + 1])
+
+        per_param = {
+            "A0": cutoff_for(self.trace_A0, self.A0, self.u_A0),
+            "half_life": cutoff_for(self.trace_half_life, self.half_life, self.u_half_life),
+            "background": cutoff_for(self.trace_background, self.background, self.u_background),
+        }
+        settled = [t for t in per_param.values() if t is not None]
+        per_param["overall"] = max(settled) if settled else None
+        return per_param
+
 
 def neg_log_posterior(params, t_s, t_e, w, n, tau_d, dead_time_model, A0_mean, A0_sigma, t12_mean, t12_sigma, priors):
     A0, half_life, B = params
@@ -191,7 +228,7 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
 
     # -- Log-linear reference fit + its use as prior location/width -----------------
     A0_lin, t12_lin, B_lin, sigma_A0_lin, sigma_t12_lin = loglinear_fit(
-        bin_centers, counts, bin_width, bin_edges[-1]
+        bin_centers, counts, bin_width, bin_edges[-1], tau_d=tau_d, dead_time_model=config.dead_time_model
     )
     A0_prior_sigma = priors.prior_widen_k * sigma_A0_lin
     t12_prior_sigma = priors.prior_widen_k * sigma_t12_lin
@@ -209,7 +246,8 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
     trace_t, trace_A0, trace_t12, trace_B = [], [], [], []
     for k in tqdm(checkpoints, desc="  Convergence trace", unit="point", disable=not show_progress):
         A0_k, t12_k, _, sigma_A0_k, sigma_t12_k = loglinear_fit(
-            bin_centers[:k], counts[:k], bin_width[:k], bin_edges[-1]
+            bin_centers[:k], counts[:k], bin_width[:k], bin_edges[-1],
+            tau_d=tau_d, dead_time_model=config.dead_time_model,
         )
         args_k = (
             t_start[:k], t_end[:k], bin_width[:k], counts[:k], tau_d, config.dead_time_model,

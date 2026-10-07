@@ -67,6 +67,13 @@ def _report_and_plot(result, bin_edges, counts, t_max, args, true_values=None):
     for warning in check_consistency(result):
         print(f"WARNING: {warning}")
 
+    cutoff = result.convergence_cutoff()["overall"]
+    if cutoff is not None:
+        print(
+            f"Convergence trace settles (stays within 3σ of the final estimate) from "
+            f"t={cutoff:.4g} s onward (shaded in bayesdecay_convergence.png)."
+        )
+
     if args.no_plots:
         return
 
@@ -123,6 +130,7 @@ def _cmd_fit(args):
         print("[2/3] Choosing channel count automatically...")
     bin_edges, counts, half_life_prelim = timestamps_to_binned(
         timestamps, t_max=args.acquisition_time, n_bins=args.n_bins,
+        tau_d=args.dead_time, dead_time_model=args.dead_time_model,
     )
     n_bins = len(counts)
     t_max = bin_edges[-1]
