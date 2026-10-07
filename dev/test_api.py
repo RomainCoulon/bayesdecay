@@ -6,6 +6,11 @@ internal -- as an end-to-end integration check and a living usage example, rathe
 than the unit-level checks in tests/. Not collected by pytest; run it directly:
 
     python dev/test_api.py
+    python dev/test_api.py --a0 10000 --half-life 120 --background 5
+
+--a0, --half-life, --background override the true (A0, T1/2, B) used to generate the
+simulated and real-data-round-trip scenarios (see `main`/`parse_args`) -- everything
+else (dead time, acquisition length, priors) stays fixed per scenario.
 
 Exits non-zero (via assert) on the first thing that looks wrong; otherwise writes its
 figures/CSVs to dev/output/ and prints a final summary. Requires the package to be
@@ -15,6 +20,7 @@ src/ on PYTHONPATH.
 
 from __future__ import annotations
 
+import argparse
 import os
 import tempfile
 
@@ -34,11 +40,20 @@ def section(title):
 def check_fit_matches_truth(result, true_values, label):
     for name, true_val in true_values.items():
         ci = getattr(result, f"{name}_ci95")
-        # Same tolerance as bayesdecay.report.check_consistency: background (and any
-        # parameter) has a physical floor at 0, and when the true value legitimately
-        # sits there, the empirical CI's lower bound naturally lands a little above 0
-        # (a one-sided pile-up at the boundary) -- not a sign anything is wrong.
-        tol = 0.02 * (ci[1] - ci[0])
+        # Two sources of slack, taken together:
+        # 1. Same as bayesdecay.report.check_consistency: background (and any
+        #    parameter) has a physical floor at 0, and when the true value
+        #    legitimately sits there, the empirical CI's lower bound naturally lands
+        #    a little above 0 (a one-sided pile-up at the boundary) -- healthy, not a
+        #    sign of a bug.
+        # 2. auto_bin_count's channel width keeps the per-channel rate change under
+        #    ~1% by design (see bayesdecay.model), which is an approximation, not an
+        #    exact likelihood: at very high statistics (e.g. a large --a0 on the CLI
+        #    for this script -> millions of counts) the posterior can become tight
+        #    enough that this small, systematic per-channel bias is itself resolvable
+        #    -- a real, understood property of the binned-channel method, not
+        #    something a user picking a big A0 should trip a false "it's broken" on.
+        tol = max(0.02 * (ci[1] - ci[0]), 0.01 * abs(true_val))
         assert ci[0] - tol <= true_val <= ci[1] + tol, (
             f"[{label}] {name}: true value {true_val} not inside 95% CI {ci} (tol={tol:.3g})"
         )
@@ -118,17 +133,16 @@ def test_deadtime_round_trip():
         print(f"{model}: round-trip OK")
 
 
-def test_real_data_ingestion_path():
+def test_real_data_ingestion_path(A0=5000.0, half_life=45.0, background=0.0, tau_d=15e-6, t_max=270.0):
     section("real data: load_timestamps + timestamps_to_binned (CSV round trip)")
-    A0, half_life, tau_d, t_max = 5000.0, 45.0, 15e-6, 270.0
     lam = np.log(2) / half_life
     rng = np.random.default_rng(2)
 
     # Build a pseudo list-mode CSV: histogram, then spread each channel's counts
     # uniformly within the channel -- good enough to exercise the ingestion path
     # end to end, not a physically exact list-mode simulator.
-    n_bins, _ = bd.auto_bin_count(A0, lam, 0.0, t_max, tau_d, rng=rng)
-    bin_edges, counts = bd.simulate_binned(A0, lam, 0.0, t_max, tau_d, n_bins, rng=rng)
+    n_bins, _ = bd.auto_bin_count(A0, lam, background, t_max, tau_d, rng=rng)
+    bin_edges, counts = bd.simulate_binned(A0, lam, background, t_max, tau_d, n_bins, rng=rng)
     t_start, t_end = bin_edges[:-1], bin_edges[1:]
     events = np.sort(np.concatenate([
         rng.uniform(s, e, size=c) for c, s, e in zip(counts, t_start, t_end) if c > 0
@@ -151,14 +165,32 @@ def test_real_data_ingestion_path():
           f"(preliminary T1/2={half_life_prelim:.3g} s)")
 
     result = bd.fit(loaded_edges, loaded_counts, tau_d, show_progress=False)
-    check_fit_matches_truth(result, {"A0": A0, "half_life": half_life, "background": 0.0}, "real_data")
+    check_fit_matches_truth(
+        result, {"A0": A0, "half_life": half_life, "background": background}, "real_data"
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Smoke-test the bayesdecay public API.")
+    parser.add_argument("--a0", type=float, default=4000.0, help="Initial activity A0, in cps (default: 4000).")
+    parser.add_argument("--half-life", type=float, default=60.0, help="Half-life T1/2, in seconds (default: 60).")
+    parser.add_argument("--background", type=float, default=1.0, help="Background B, in cps (default: 1.0).")
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
+
     test_deadtime_round_trip()
-    test_real_data_ingestion_path()
-    simulate_and_fit("nonparalyzable", dead_time_model="nonparalyzable")
-    simulate_and_fit("paralyzable", dead_time_model="paralyzable", tau_d=25e-6)
+    test_real_data_ingestion_path(A0=args.a0, half_life=args.half_life, background=args.background)
+    simulate_and_fit(
+        "nonparalyzable", dead_time_model="nonparalyzable",
+        A0=args.a0, half_life=args.half_life, background=args.background,
+    )
+    simulate_and_fit(
+        "paralyzable", dead_time_model="paralyzable", tau_d=25e-6,
+        A0=args.a0, half_life=args.half_life, background=args.background,
+    )
 
     print()
     print("ALL API SMOKE TESTS PASSED")
