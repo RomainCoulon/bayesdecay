@@ -446,10 +446,19 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
     half_B = max(0.5 * B_final + 10.0, 10.0)
     laplace = _laplace_sigma(A0_final, t12_final, B_final, args_full)
     if laplace is not None:
-        half_A0 = max(target_k * laplace[0], 10.0)
-        half_t12 = max(target_k * laplace[1], 1.0)
+        # Only a tiny numerical-safety floor here (guarding against a literal
+        # zero/negative width from Hessian noise), NOT the much larger heuristic
+        # floors above: those assume a "typical" scale (tens of cps/seconds) that
+        # does NOT hold for background once statistics are high enough to resolve
+        # it to a small fraction of a cps -- applying them here would override a
+        # legitimately tiny Laplace estimate and reintroduce the exact
+        # under-resolution this sizing exists to avoid (observed happening to
+        # background specifically: large enough to be Laplace-sized, but with a
+        # true sigma well under the old 10.0 cps floor).
+        half_A0 = max(target_k * laplace[0], 1e-6)
+        half_t12 = max(target_k * laplace[1], 1e-6)
         if len(laplace) == 3:
-            half_B = max(target_k * laplace[2], 10.0)
+            half_B = max(target_k * laplace[2], 1e-6)
 
     # -- Containment: widen (all three dimensions in lockstep) until no marginal's
     # tails spill past the window edges. Lockstep, not per-dimension, because A0
