@@ -190,47 +190,88 @@ def _fit_map(x0, args, bounds):
     )
 
 
-def _laplace_sigma_A0_T12(A0_final, t12_final, B_final, args_full):
-    """Cheap (a dozen neg_log_posterior evaluations -- negligible next to a single
-    local-grid pass) local quadratic (Laplace) approximation of the (A0, half-life)
+def _numerical_hessian(f, x0, h):
+    """Central-difference Hessian of scalar function ``f`` at ``x0`` (length-n),
+    with per-dimension step sizes ``h``. O(n^2) evaluations of ``f`` -- only ever
+    called here with n in {2, 3}, negligible next to a single local-grid pass."""
+    n = len(x0)
+    x0 = np.asarray(x0, dtype=float)
+    f0 = f(x0)
+    H = np.zeros((n, n))
+    for i in range(n):
+        xp, xm = x0.copy(), x0.copy()
+        xp[i] += h[i]
+        xm[i] -= h[i]
+        H[i, i] = (f(xp) - 2 * f0 + f(xm)) / h[i] ** 2
+    for i in range(n):
+        for j in range(i + 1, n):
+            xpp, xpm, xmp, xmm = x0.copy(), x0.copy(), x0.copy(), x0.copy()
+            xpp[i] += h[i]; xpp[j] += h[j]
+            xpm[i] += h[i]; xpm[j] -= h[j]
+            xmp[i] -= h[i]; xmp[j] += h[j]
+            xmm[i] -= h[i]; xmm[j] -= h[j]
+            H[i, j] = H[j, i] = (f(xpp) - f(xpm) - f(xmp) + f(xmm)) / (4 * h[i] * h[j])
+    return H
+
+
+def _laplace_sigma(A0_final, t12_final, B_final, args_full):
+    """Cheap (a handful of neg_log_posterior evaluations -- negligible next to a
+    single local-grid pass) local quadratic (Laplace) approximation of the
     marginal standard deviations at the MAP, from the numerical Hessian of
-    neg_log_posterior restricted to those two dimensions (B held fixed at its MAP
-    value: B often sits at its physical floor, where a quadratic approximation
-    doesn't apply, but A0 and half-life don't share that problem).
+    neg_log_posterior.
 
     Used ONLY to size the local covariance grid's window well -- the grid's own
     second-moment integration remains the actual reported uncertainty. Without
-    this, the window is sized from a fixed fraction of the MAP value
-    (``max(0.05 * A0_final, 10.0)``), which at very high statistics can be
-    orders of magnitude wider than the true posterior, leaving the grid so coarse
-    that almost all its mass piles onto a single cell -- underestimating the
-    reported uncertainty despite the window safely containing the posterior (see
-    the git history for this function's introduction for the full diagnosis).
+    this, the window is sized from a fixed fraction of the MAP value, which at
+    very high statistics can be orders of magnitude wider than the true
+    posterior, leaving the grid so coarse that almost all its mass piles onto a
+    single cell -- underestimating the reported uncertainty despite the window
+    safely containing the posterior (see the git history for this function's
+    introduction for the full diagnosis).
+
+    B often sits at its physical floor, where a quadratic approximation doesn't
+    apply (a central difference would probe B < 0, where neg_log_posterior is
+    +inf) -- in that case only (A0, half-life) are sized this way, with B held
+    fixed at its MAP value, and the caller falls back to its own heuristic for
+    B's window. But when B is well away from the floor AND the statistics are
+    high enough, B can be constrained to a width far narrower than that fixed
+    heuristic expects (e.g. a background of several hundred cps resolved to a
+    fraction of a cps): leaving its window badly oversized relative to the
+    others then corrupts A0/half-life's marginals too, since marginalizing over
+    a badly-under-resolved, strongly-correlated B axis drags them down with it
+    (this is what the 3-parameter Hessian below is for -- sizing all three
+    windows from one consistent quadratic approximation when it is safe to).
 
     Returns ``None`` if the Hessian isn't usable (not finite / not positive
     definite), in which case the caller falls back to the old fixed-fraction
-    window -- still safe, just potentially needing more widen passes.
+    windows entirely -- still safe, just potentially needing more widen passes.
+    Otherwise returns a 2-tuple ``(sigma_A0, sigma_t12)`` (B at its floor) or a
+    3-tuple ``(sigma_A0, sigma_t12, sigma_B)``.
     """
-    def f(a0, t12):
-        return neg_log_posterior([a0, t12, B_final], *args_full)
+    def neg_post(params):
+        return neg_log_posterior(list(params), *args_full)
 
     h_A0 = max(abs(A0_final) * 1e-4, 1e-3)
     h_t12 = max(abs(t12_final) * 1e-4, 1e-6)
+    h_B = max(abs(B_final) * 1e-4, 1e-3)
+
+    n_dims = 2 if B_final <= h_B else 3
+    x0 = [A0_final, t12_final] if n_dims == 2 else [A0_final, t12_final, B_final]
+    h = [h_A0, h_t12] if n_dims == 2 else [h_A0, h_t12, h_B]
+    f = (lambda p: neg_post([p[0], p[1], B_final])) if n_dims == 2 else neg_post
+
     try:
-        f00 = f(A0_final, t12_final)
-        d2_A0 = (f(A0_final + h_A0, t12_final) - 2 * f00 + f(A0_final - h_A0, t12_final)) / h_A0**2
-        d2_t12 = (f(A0_final, t12_final + h_t12) - 2 * f00 + f(A0_final, t12_final - h_t12)) / h_t12**2
-        d2_cross = (
-            f(A0_final + h_A0, t12_final + h_t12) - f(A0_final + h_A0, t12_final - h_t12)
-            - f(A0_final - h_A0, t12_final + h_t12) + f(A0_final - h_A0, t12_final - h_t12)
-        ) / (4 * h_A0 * h_t12)
-        cov = np.linalg.inv(np.array([[d2_A0, d2_cross], [d2_cross, d2_t12]]))
-        sigma = np.sqrt(np.diag(cov))
+        H = _numerical_hessian(f, x0, h)
+        variances = np.diag(np.linalg.inv(H))
     except np.linalg.LinAlgError:
         return None
-    if not np.all(np.isfinite(sigma)) or np.any(sigma <= 0):
+    # A non-positive-definite Hessian (a negative "variance") is an expected,
+    # ordinary outcome here -- not every MAP is a clean quadratic bowl in finite
+    # differences -- so check for it before sqrt rather than let it warn.
+    if not np.all(np.isfinite(variances)) or np.any(variances <= 0):
         return None
-    return sigma[0], sigma[1]
+    sigma = np.sqrt(variances)
+    return tuple(sigma)
 
 
 def _weighted_quantile(samples_1d, weights, q):
@@ -356,23 +397,25 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
     # for n_vis points spanning +/-k*sigma, n_eff ~= sqrt(pi) * (n_vis - 1) / k.
     target_k = np.sqrt(np.pi) * (config.n_vis - 1) / min_effective
 
-    # -- Initial window: Laplace (Hessian-at-the-MAP) sizing for A0/half-life -------
-    # A fixed-fraction-of-the-MAP window (the old ``max(0.05 * A0_final, 10.0)``)
-    # can be orders of magnitude wider than the true posterior at very high
-    # statistics. Sizing from the local curvature instead gets the window right
-    # from the start in the common (well-behaved, roughly Gaussian) case, so the
-    # widen loop below rarely needs to do anything -- it stays as a safety net for
-    # whichever dimension not Laplace-sized (B, which often sits at its physical
-    # floor where this quadratic approximation doesn't apply) and for cases where
-    # the Laplace estimate undershoots (e.g. a non-Gaussian posterior).
+    # -- Initial window: Laplace (Hessian-at-the-MAP) sizing -------------------------
+    # A fixed-fraction-of-the-MAP window (the old ``max(0.05 * A0_final, 10.0)``,
+    # and B's own heuristic below) can be orders of magnitude wider than the true
+    # posterior at very high statistics. Sizing from the local curvature instead
+    # gets the window right from the start in the common (well-behaved, roughly
+    # Gaussian) case, so the widen loop below rarely needs to do anything -- it
+    # stays as a safety net for whichever dimension isn't Laplace-sized (B, when
+    # it sits at its physical floor, where this quadratic approximation doesn't
+    # apply) and for cases where the Laplace estimate undershoots (e.g. a
+    # non-Gaussian posterior).
     half_A0 = max(0.05 * A0_final, 10.0)
     half_t12 = max(0.05 * t12_final, 1.0)
     half_B = max(0.5 * B_final + 10.0, 10.0)
-    laplace = _laplace_sigma_A0_T12(A0_final, t12_final, B_final, args_full)
+    laplace = _laplace_sigma(A0_final, t12_final, B_final, args_full)
     if laplace is not None:
-        sigma_A0_laplace, sigma_t12_laplace = laplace
-        half_A0 = max(target_k * sigma_A0_laplace, 10.0)
-        half_t12 = max(target_k * sigma_t12_laplace, 1.0)
+        half_A0 = max(target_k * laplace[0], 10.0)
+        half_t12 = max(target_k * laplace[1], 1.0)
+        if len(laplace) == 3:
+            half_B = max(target_k * laplace[2], 10.0)
 
     # -- Containment: widen (all three dimensions in lockstep) until no marginal's
     # tails spill past the window edges. Lockstep, not per-dimension, because A0
