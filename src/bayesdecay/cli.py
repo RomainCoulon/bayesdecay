@@ -27,9 +27,31 @@ def _common_fit_args(parser):
              "digital electronics) or 'paralyzable' (extending -- every true event, recorded "
              "or not, restarts the dead period). Default: nonparalyzable.",
     )
-    parser.add_argument("--b-prior-scale", type=float, default=5.0, help="Mean of the exponential prior on background B, in cps (default: 5.0).")
-    parser.add_argument("--prior-widen-k", type=float, default=5.0, help="Widening factor applied to the log-linear regression SE for the A0/T1/2 prior scale (default: 5.0).")
-    parser.add_argument("--prior-df", type=float, default=4.0, help="Degrees of freedom of the Student-t prior on A0/T1/2 -- lower is less informative (heavier tails), higher approaches a Gaussian (default: 4.0).")
+    parser.add_argument("--b-prior-scale", type=float, default=5.0, help="Mean of the exponential prior on background B, in cps -- ignored if --background-prior-mean/--background-prior-sigma are set (default: 5.0).")
+    parser.add_argument("--prior-widen-k", type=float, default=5.0, help="Widening factor applied to the log-linear regression SE for the A0/T1/2 prior scale, when NOT using an informative prior for that parameter (default: 5.0).")
+    parser.add_argument("--prior-df", type=float, default=4.0, help="Degrees of freedom of the Student-t prior on A0/T1/2 -- lower is less informative (heavier tails), higher approaches a Gaussian (default: 4.0; consider raising this, e.g. to 30, alongside an informative prior below).")
+    parser.add_argument(
+        "--half-life-prior-mean", type=float, default=None,
+        help="INFORMATIVE prior: known half-life, in seconds (e.g. from a DDEP/ENSDF nuclear-data "
+             "evaluation, independent of this measurement). Requires --half-life-prior-sigma too. "
+             "Replaces the default weakly-informative prior (centred on this measurement's own "
+             "log-linear fit) with one centred on this external value instead.",
+    )
+    parser.add_argument("--half-life-prior-sigma", type=float, default=None, help="Standard uncertainty of --half-life-prior-mean, in seconds.")
+    parser.add_argument(
+        "--a0-prior-mean", type=float, default=None,
+        help="INFORMATIVE prior: known initial activity, in cps (e.g. from a reference source "
+             "certificate). Requires --a0-prior-sigma too. Rarely applicable -- A0 is usually "
+             "exactly what the measurement is determining.",
+    )
+    parser.add_argument("--a0-prior-sigma", type=float, default=None, help="Standard uncertainty of --a0-prior-mean, in cps.")
+    parser.add_argument(
+        "--background-prior-mean", type=float, default=None,
+        help="INFORMATIVE prior: known background rate, in cps (e.g. from a separate blank "
+             "measurement). Requires --background-prior-sigma too. Replaces the default "
+             "exponential('probably near zero') prior with a Gaussian centred here.",
+    )
+    parser.add_argument("--background-prior-sigma", type=float, default=None, help="Standard uncertainty of --background-prior-mean, in cps.")
     parser.add_argument("--n-checkpoints", type=int, default=20, help="Number of points in the convergence trace (default: 20).")
     parser.add_argument("--n-is-samples", type=int, default=100_000, help="Importance-sampling draws for marginal smoothing (default: 100000).")
     parser.add_argument(
@@ -52,7 +74,12 @@ def _config_from_args(args):
         n_checkpoints=args.n_checkpoints,
         n_is_samples=args.n_is_samples,
         quadrature_points=args.quadrature_points,
-        priors=Priors(b_prior_scale=args.b_prior_scale, prior_widen_k=args.prior_widen_k, prior_df=args.prior_df),
+        priors=Priors(
+            b_prior_scale=args.b_prior_scale, prior_widen_k=args.prior_widen_k, prior_df=args.prior_df,
+            half_life_prior_mean=args.half_life_prior_mean, half_life_prior_sigma=args.half_life_prior_sigma,
+            A0_prior_mean=args.a0_prior_mean, A0_prior_sigma=args.a0_prior_sigma,
+            background_prior_mean=args.background_prior_mean, background_prior_sigma=args.background_prior_sigma,
+        ),
     )
 
 

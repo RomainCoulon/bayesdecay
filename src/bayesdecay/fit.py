@@ -30,7 +30,7 @@ from scipy.stats import gaussian_kde, multivariate_normal, norm
 from tqdm import tqdm
 
 from .model import expected_observed_counts, loglinear_fit
-from .priors import Priors, log_prior_background, log_prior_student_t
+from .priors import Priors, log_prior_background, log_prior_gaussian, log_prior_student_t
 
 
 @dataclass
@@ -144,6 +144,24 @@ class FitResult:
         return per_param
 
 
+def _log_prior_B(B, priors):
+    """Background prior: Gaussian centred on ``priors.background_prior_mean`` when
+    that informative override is set (see Priors.informative()), else the default
+    exponential(``b_prior_scale``) -- mode at B=0, "probably negligible"."""
+    if priors.background_prior_mean is not None and priors.background_prior_sigma is not None:
+        return log_prior_gaussian(B, priors.background_prior_mean, priors.background_prior_sigma)
+    return log_prior_background(B, priors.b_prior_scale)
+
+
+def _prior_mean_sigma(informative_mean, informative_sigma, fallback_mean, fallback_sigma):
+    """Resolve one parameter's effective prior (mean, sigma): the informative
+    override from Priors.informative() when both its mean and sigma are set, else
+    the weakly-informative fallback (the data's own log-linear fit, widened)."""
+    if informative_mean is not None and informative_sigma is not None:
+        return informative_mean, informative_sigma
+    return fallback_mean, fallback_sigma
+
+
 def neg_log_posterior(
     params, t_s, t_e, n, tau_d, dead_time_model, quadrature_points,
     A0_mean, A0_sigma, t12_mean, t12_sigma, priors,
@@ -162,7 +180,7 @@ def neg_log_posterior(
     log_prior_total = (
         log_prior_student_t(A0, A0_mean, A0_sigma, priors.prior_df)
         + log_prior_student_t(half_life, t12_mean, t12_sigma, priors.prior_df)
-        + log_prior_background(B, priors.b_prior_scale)
+        + _log_prior_B(B, priors)
     )
     return neg_loglik - log_prior_total
 
@@ -315,21 +333,31 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
     n_bins = len(counts)
 
     # -- Log-linear reference fit + its use as prior location/width -----------------
+    # (unless Priors.informative() overrides a given parameter -- see _prior_mean_sigma)
     A0_lin, t12_lin, B_lin, sigma_A0_lin, sigma_t12_lin = loglinear_fit(
         bin_centers, counts, bin_width, bin_edges[-1], tau_d=tau_d, dead_time_model=config.dead_time_model
     )
-    A0_prior_sigma = priors.prior_widen_k * sigma_A0_lin
-    t12_prior_sigma = priors.prior_widen_k * sigma_t12_lin
+    A0_prior_mean, A0_prior_sigma = _prior_mean_sigma(
+        priors.A0_prior_mean, priors.A0_prior_sigma, A0_lin, priors.prior_widen_k * sigma_A0_lin
+    )
+    t12_prior_mean, t12_prior_sigma = _prior_mean_sigma(
+        priors.half_life_prior_mean, priors.half_life_prior_sigma, t12_lin, priors.prior_widen_k * sigma_t12_lin
+    )
 
     # -- MAP point estimate -----------------------------------------------------------
     args_full = (
         t_start, t_end, counts, tau_d, config.dead_time_model, config.quadrature_points,
-        A0_lin, A0_prior_sigma, t12_lin, t12_prior_sigma, priors,
+        A0_prior_mean, A0_prior_sigma, t12_prior_mean, t12_prior_sigma, priors,
     )
     res = _fit_map([A0_lin, t12_lin, B_lin], args_full, bounds)
     A0_final, t12_final, B_final = res.x
 
     # -- Convergence trace: re-fit using only the first k channels, for growing k ----
+    # The optimizer's STARTING guess still comes from the (per-checkpoint) local
+    # log-linear fit regardless of prior mode -- just a search heuristic. The PRIOR
+    # centre/width, though, stays fixed at the informative override when one is
+    # given (external knowledge doesn't change as more of this dataset arrives);
+    # only the weakly-informative fallback re-derives it from the growing data.
     checkpoints = np.unique(np.linspace(n_bins // config.n_checkpoints, n_bins, config.n_checkpoints, dtype=int))
     trace_t, trace_A0, trace_t12, trace_B = [], [], [], []
     for k in tqdm(checkpoints, desc="  Convergence trace", unit="point", disable=not show_progress):
@@ -337,9 +365,15 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
             bin_centers[:k], counts[:k], bin_width[:k], bin_edges[-1],
             tau_d=tau_d, dead_time_model=config.dead_time_model,
         )
+        A0_prior_mean_k, A0_prior_sigma_k = _prior_mean_sigma(
+            priors.A0_prior_mean, priors.A0_prior_sigma, A0_k, priors.prior_widen_k * sigma_A0_k
+        )
+        t12_prior_mean_k, t12_prior_sigma_k = _prior_mean_sigma(
+            priors.half_life_prior_mean, priors.half_life_prior_sigma, t12_k, priors.prior_widen_k * sigma_t12_k
+        )
         args_k = (
             t_start[:k], t_end[:k], counts[:k], tau_d, config.dead_time_model, config.quadrature_points,
-            A0_k, priors.prior_widen_k * sigma_A0_k, t12_k, priors.prior_widen_k * sigma_t12_k, priors,
+            A0_prior_mean_k, A0_prior_sigma_k, t12_prior_mean_k, t12_prior_sigma_k, priors,
         )
         res_k = _fit_map([A0_k, t12_k, 0.0], args_k, bounds)
         trace_A0.append(res_k.x[0])
@@ -355,9 +389,9 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         AA, TT, BB = np.meshgrid(A0_grid, t12_grid, B_grid, indexing="ij")
         LL = np.log(2) / TT
         log_prior = (
-            log_prior_student_t(AA, A0_lin, A0_prior_sigma, priors.prior_df)
-            + log_prior_student_t(TT, t12_lin, t12_prior_sigma, priors.prior_df)
-            + log_prior_background(BB, priors.b_prior_scale)
+            log_prior_student_t(AA, A0_prior_mean, A0_prior_sigma, priors.prior_df)
+            + log_prior_student_t(TT, t12_prior_mean, t12_prior_sigma, priors.prior_df)
+            + _log_prior_B(BB, priors)
         )
         posterior = np.exp(log_prior - np.max(log_prior))
         posterior /= np.sum(posterior)
@@ -512,9 +546,9 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
             mu = np.maximum(mu, 1e-300)
             ll = (
                 np.sum(counts[None, :] * np.log(mu) - mu, axis=1)
-                + log_prior_student_t(av, A0_lin, A0_prior_sigma, priors.prior_df)
-                + log_prior_student_t(tv, t12_lin, t12_prior_sigma, priors.prior_df)
-                + log_prior_background(bv, priors.b_prior_scale)
+                + log_prior_student_t(av, A0_prior_mean, A0_prior_sigma, priors.prior_df)
+                + log_prior_student_t(tv, t12_prior_mean, t12_prior_sigma, priors.prior_df)
+                + _log_prior_B(bv, priors)
             )
             tmp = out[sl]
             tmp[valid] = ll

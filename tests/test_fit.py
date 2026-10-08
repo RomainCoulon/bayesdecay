@@ -79,3 +79,101 @@ def test_fit_dead_time_model_mismatch_biases_result():
     correct_err = abs(correct.A0 - A0_true)
     wrong_err = abs(wrong.A0 - A0_true)
     assert wrong_err > correct_err
+
+
+def test_informative_prior_narrows_uncertainty_without_losing_truth():
+    # A short, weakly-constraining acquisition (little of the decay observed) is
+    # exactly the regime where external knowledge of the half-life should help the
+    # most: Priors.informative(), given the TRUE half-life as if it were known from
+    # an independent nuclear-data evaluation, should report a substantially
+    # tighter half-life uncertainty than Priors.weakly_informative() (the
+    # default, centred on this measurement's own noisy log-linear fit) while
+    # still correctly bracketing the truth.
+    rng = np.random.default_rng(7)
+    A0_true, half_life_true, tau_d = 4000.0, 60.0, 1e-6
+    t_max = 0.1 * half_life_true  # short: little decay resolved
+    lam_true = np.log(2) / half_life_true
+
+    bin_edges, counts = simulate_binned(
+        A0_true, lam_true, 0.0, t_max, tau_d, n_bins=150,
+        dead_time_model="nonparalyzable", rng=rng,
+    )
+
+    weak = fit(
+        bin_edges, counts, tau_d,
+        config=FitConfig(n_checkpoints=3, n_is_samples=5_000, priors=Priors.weakly_informative()),
+        show_progress=False,
+    )
+    informed = fit(
+        bin_edges, counts, tau_d,
+        config=FitConfig(
+            n_checkpoints=3, n_is_samples=5_000,
+            priors=Priors.informative(half_life_mean=half_life_true, half_life_sigma=0.5),
+        ),
+        show_progress=False,
+    )
+
+    assert weak.converged and informed.converged
+    assert informed.u_half_life < 0.5 * weak.u_half_life
+    assert informed.half_life_ci95[0] < half_life_true < informed.half_life_ci95[1]
+
+
+def test_informative_prior_partial_override_leaves_other_parameters_data_driven():
+    # Supplying ONLY an informative half-life prior should leave A0 and background
+    # on their default weakly-informative (data-driven) behaviour -- i.e. close to
+    # the fully weakly-informative fit's A0, not pinned or distorted by the
+    # half-life override.
+    rng = np.random.default_rng(11)
+    A0_true, half_life_true, tau_d = 4000.0, 60.0, 1e-6
+    t_max = 300.0
+    lam_true = np.log(2) / half_life_true
+
+    bin_edges, counts = simulate_binned(
+        A0_true, lam_true, 0.0, t_max, tau_d, n_bins=150,
+        dead_time_model="nonparalyzable", rng=rng,
+    )
+
+    weak = fit(
+        bin_edges, counts, tau_d,
+        config=FitConfig(n_checkpoints=3, n_is_samples=5_000, priors=Priors.weakly_informative()),
+        show_progress=False,
+    )
+    informed = fit(
+        bin_edges, counts, tau_d,
+        config=FitConfig(
+            n_checkpoints=3, n_is_samples=5_000,
+            priors=Priors.informative(half_life_mean=half_life_true, half_life_sigma=0.1),
+        ),
+        show_progress=False,
+    )
+
+    assert informed.A0 == pytest.approx(weak.A0, rel=0.02)
+
+
+def test_informative_background_prior_pulls_toward_known_value():
+    # With a real, informative background prior (mean/sigma from, say, a separate
+    # blank measurement), the recovered background should land close to that known
+    # value when the counting data alone are too weak to strongly contradict it --
+    # a basic sanity check that the Gaussian background-prior branch is wired up
+    # (not silently falling back to the default exponential-near-zero prior).
+    rng = np.random.default_rng(3)
+    A0_true, half_life_true, B_true, tau_d = 500.0, 60.0, 20.0, 1e-6
+    t_max = 60.0  # short + low rate: background is weakly constrained by the data alone
+    lam_true = np.log(2) / half_life_true
+
+    bin_edges, counts = simulate_binned(
+        A0_true, lam_true, B_true, t_max, tau_d, n_bins=80,
+        dead_time_model="nonparalyzable", rng=rng,
+    )
+
+    informed = fit(
+        bin_edges, counts, tau_d,
+        config=FitConfig(
+            n_checkpoints=3, n_is_samples=5_000,
+            priors=Priors.informative(background_mean=B_true, background_sigma=0.5),
+        ),
+        show_progress=False,
+    )
+
+    assert informed.converged
+    assert informed.background == pytest.approx(B_true, abs=2.0)
