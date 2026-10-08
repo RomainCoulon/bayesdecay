@@ -6,11 +6,11 @@ internal -- as an end-to-end integration check and a living usage example, rathe
 than the unit-level checks in tests/. Not collected by pytest; run it directly:
 
     python dev/test_api.py
-    python dev/test_api.py --a0 10000 --half-life 120 --background 5
 
---a0, --half-life, --background override the true (A0, T1/2, B) used to generate the
-simulated and real-data-round-trip scenarios (see `main`/`parse_args`) -- everything
-else (dead time, acquisition length, priors) stays fixed per scenario.
+The true (A0, T1/2, B) and the measurement time used to generate the simulated
+scenarios are set as plain variables at the top of `main()` (not CLI args) -- edit
+them there to try other values; everything else (dead time, priors) stays fixed
+per scenario.
 
 Exits non-zero (via assert) on the first thing that looks wrong; otherwise writes its
 figures/CSVs to dev/output/ and prints a final summary. Requires the package to be
@@ -20,7 +20,6 @@ src/ on PYTHONPATH.
 
 from __future__ import annotations
 
-import argparse
 import os
 import tempfile
 
@@ -180,27 +179,24 @@ def test_real_data_ingestion_path(A0=5000.0, half_life=45.0, background=0.0, tau
     )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Smoke-test the bayesdecay public API.")
-    parser.add_argument("--a0", type=float, default=4000.0, help="Initial activity A0, in cps (default: 4000).")
-    parser.add_argument("--half-life", type=float, default=60.0, help="Half-life T1/2, in seconds (default: 60).")
-    parser.add_argument("--background", type=float, default=1.0, help="Background B, in cps (default: 1.0).")
-    return parser.parse_args()
-
-
 def main():
-    args = parse_args()
+    # True (A0, T1/2, B) and measurement time for the simulated scenarios below --
+    # edit these directly to try other values.
+    A0 = 7000.0          # initial activity, in cps
+    half_life = 120.0     # half-life T1/2, in seconds
+    background = 1.0     # background B, in cps
+    t_max = 3600.0        # measurement time, in seconds
 
     test_deadtime_round_trip()
-#    test_real_data_ingestion_path(A0=args.a0, half_life=args.half_life, background=args.background)
-    test_real_data_ingestion_path(A0=2000, half_life=20, background=0)
+#    test_real_data_ingestion_path(A0=A0, half_life=half_life, t_max=t_max, background=background)
+    test_real_data_ingestion_path(A0=A0, half_life=half_life, t_max=t_max, background=background)
     simulate_and_fit(
         "nonparalyzable", dead_time_model="nonparalyzable",
-        A0=args.a0, half_life=args.half_life, background=args.background,
+        A0=A0, half_life=half_life, background=background, t_max=t_max,
     )
     simulate_and_fit(
         "paralyzable", dead_time_model="paralyzable", tau_d=25e-6,
-        A0=args.a0, half_life=args.half_life, background=args.background,
+        A0=A0, half_life=half_life, background=background, t_max=t_max,
     )
 
     print()
