@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import minimize
-from scipy.stats import gaussian_kde, multivariate_normal
+from scipy.stats import gaussian_kde, multivariate_normal, norm
 from tqdm import tqdm
 
 from .model import expected_observed_counts, loglinear_fit
@@ -190,6 +190,49 @@ def _fit_map(x0, args, bounds):
     )
 
 
+def _laplace_sigma_A0_T12(A0_final, t12_final, B_final, args_full):
+    """Cheap (a dozen neg_log_posterior evaluations -- negligible next to a single
+    local-grid pass) local quadratic (Laplace) approximation of the (A0, half-life)
+    marginal standard deviations at the MAP, from the numerical Hessian of
+    neg_log_posterior restricted to those two dimensions (B held fixed at its MAP
+    value: B often sits at its physical floor, where a quadratic approximation
+    doesn't apply, but A0 and half-life don't share that problem).
+
+    Used ONLY to size the local covariance grid's window well -- the grid's own
+    second-moment integration remains the actual reported uncertainty. Without
+    this, the window is sized from a fixed fraction of the MAP value
+    (``max(0.05 * A0_final, 10.0)``), which at very high statistics can be
+    orders of magnitude wider than the true posterior, leaving the grid so coarse
+    that almost all its mass piles onto a single cell -- underestimating the
+    reported uncertainty despite the window safely containing the posterior (see
+    the git history for this function's introduction for the full diagnosis).
+
+    Returns ``None`` if the Hessian isn't usable (not finite / not positive
+    definite), in which case the caller falls back to the old fixed-fraction
+    window -- still safe, just potentially needing more widen passes.
+    """
+    def f(a0, t12):
+        return neg_log_posterior([a0, t12, B_final], *args_full)
+
+    h_A0 = max(abs(A0_final) * 1e-4, 1e-3)
+    h_t12 = max(abs(t12_final) * 1e-4, 1e-6)
+    try:
+        f00 = f(A0_final, t12_final)
+        d2_A0 = (f(A0_final + h_A0, t12_final) - 2 * f00 + f(A0_final - h_A0, t12_final)) / h_A0**2
+        d2_t12 = (f(A0_final, t12_final + h_t12) - 2 * f00 + f(A0_final, t12_final - h_t12)) / h_t12**2
+        d2_cross = (
+            f(A0_final + h_A0, t12_final + h_t12) - f(A0_final + h_A0, t12_final - h_t12)
+            - f(A0_final - h_A0, t12_final + h_t12) + f(A0_final - h_A0, t12_final - h_t12)
+        ) / (4 * h_A0 * h_t12)
+        cov = np.linalg.inv(np.array([[d2_A0, d2_cross], [d2_cross, d2_t12]]))
+        sigma = np.sqrt(np.diag(cov))
+    except np.linalg.LinAlgError:
+        return None
+    if not np.all(np.isfinite(sigma)) or np.any(sigma <= 0):
+        return None
+    return sigma[0], sigma[1]
+
+
 def _weighted_quantile(samples_1d, weights, q):
     order = np.argsort(samples_1d)
     s, w = samples_1d[order], weights[order]
@@ -308,26 +351,36 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         return 1.0 / np.sum(p * p)
 
     min_effective = config.min_effective_fraction * config.n_vis
+    # Half-width (in units of the LOCAL covariance grid's own sigma estimate) that
+    # a roughly-Gaussian marginal needs to reach min_effective effective grid cells:
+    # for n_vis points spanning +/-k*sigma, n_eff ~= sqrt(pi) * (n_vis - 1) / k.
+    target_k = np.sqrt(np.pi) * (config.n_vis - 1) / min_effective
 
-    def adjust_half(half, marg, grid, floor):
-        """One step of bidirectional window sizing for a single dimension: widen
-        (double) if the posterior's tails spill past the window edges, else shrink
-        (toward the window that would hit exactly min_effective) if the grid is
-        under-resolving a posterior narrower than the window, else leave it alone.
-        Shrinking targets n_eff/half ~ constant (true for a posterior whose shape
-        stays fixed while only the window/grid-spacing changes), with the per-step
-        ratio floored at 0.1 so one badly-under-resolved pass doesn't overshoot into
-        a too-narrow window and start oscillating with the widen branch."""
-        if edge_mass_bad(marg, grid, floor):
-            return half * 2.0, True
-        n_eff = effective_points(marg)
-        if n_eff < min_effective:
-            return half * max(n_eff / min_effective, 0.1), True
-        return half, False
-
+    # -- Initial window: Laplace (Hessian-at-the-MAP) sizing for A0/half-life -------
+    # A fixed-fraction-of-the-MAP window (the old ``max(0.05 * A0_final, 10.0)``)
+    # can be orders of magnitude wider than the true posterior at very high
+    # statistics. Sizing from the local curvature instead gets the window right
+    # from the start in the common (well-behaved, roughly Gaussian) case, so the
+    # widen loop below rarely needs to do anything -- it stays as a safety net for
+    # whichever dimension not Laplace-sized (B, which often sits at its physical
+    # floor where this quadratic approximation doesn't apply) and for cases where
+    # the Laplace estimate undershoots (e.g. a non-Gaussian posterior).
     half_A0 = max(0.05 * A0_final, 10.0)
     half_t12 = max(0.05 * t12_final, 1.0)
     half_B = max(0.5 * B_final + 10.0, 10.0)
+    laplace = _laplace_sigma_A0_T12(A0_final, t12_final, B_final, args_full)
+    if laplace is not None:
+        sigma_A0_laplace, sigma_t12_laplace = laplace
+        half_A0 = max(target_k * sigma_A0_laplace, 10.0)
+        half_t12 = max(target_k * sigma_t12_laplace, 1.0)
+
+    # -- Containment: widen (all three dimensions in lockstep) until no marginal's
+    # tails spill past the window edges. Lockstep, not per-dimension, because A0
+    # and half-life are strongly correlated (a longer half-life + lower A0 can
+    # mimic a shorter half-life + higher A0 over a finite window): resizing one
+    # dimension's window changes what the OTHER marginals integrate over, so
+    # independent per-dimension resizing was found to oscillate indefinitely
+    # rather than converge, particularly at extreme statistics (see git history).
     converged = False
     for attempt in range(config.max_widen):
         grid_A0, grid_t12, grid_B, AA, TT, BB, posterior = local_grid_pass(
@@ -336,14 +389,54 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         marg_A0 = posterior.sum(axis=(1, 2))
         marg_t12 = posterior.sum(axis=(0, 2))
         marg_B = posterior.sum(axis=(0, 1))
-
-        half_A0, changed_A0 = adjust_half(half_A0, marg_A0, grid_A0, 0.0)
-        half_t12, changed_t12 = adjust_half(half_t12, marg_t12, grid_t12, 0.0)
-        half_B, changed_B = adjust_half(half_B, marg_B, grid_B, 0.0)
-
-        if not (changed_A0 or changed_t12 or changed_B):
+        if not (
+            edge_mass_bad(marg_A0, grid_A0, 0.0)
+            or edge_mass_bad(marg_t12, grid_t12, 0.0)
+            or edge_mass_bad(marg_B, grid_B, 0.0)
+        ):
             converged = True
             break
+        half_A0 *= 2
+        half_t12 *= 2
+        half_B *= 2
+
+    # -- Resolution safety net: if contained but still under-resolved (the Laplace
+    # estimate undershot, or B -- not Laplace-sized -- is the culprit), shrink all
+    # three windows together by the SAME ratio (driven by the worst-resolved
+    # dimension) rather than independently, for the same lockstep-not-independent
+    # reason as above. Bounded and rare in practice given the Laplace-sized start.
+    if converged:
+        for _ in range(3):
+            n_eff = min(effective_points(marg_A0), effective_points(marg_t12), effective_points(marg_B))
+            if n_eff >= min_effective:
+                break
+            ratio = max(n_eff / min_effective, 0.2)
+            half_A0 *= ratio
+            half_t12 *= ratio
+            half_B *= ratio
+            grid_A0, grid_t12, grid_B, AA, TT, BB, posterior = local_grid_pass(
+                half_A0, half_t12, half_B, desc="  Local grid (resolution refinement)"
+            )
+            marg_A0 = posterior.sum(axis=(1, 2))
+            marg_t12 = posterior.sum(axis=(0, 2))
+            marg_B = posterior.sum(axis=(0, 1))
+            if (
+                edge_mass_bad(marg_A0, grid_A0, 0.0)
+                or edge_mass_bad(marg_t12, grid_t12, 0.0)
+                or edge_mass_bad(marg_B, grid_B, 0.0)
+            ):
+                # Overshot back into truncation -- widen back once and stop refining
+                # rather than risk oscillating between the two failure modes.
+                half_A0 *= 2
+                half_t12 *= 2
+                half_B *= 2
+                grid_A0, grid_t12, grid_B, AA, TT, BB, posterior = local_grid_pass(
+                    half_A0, half_t12, half_B, desc="  Local grid (re-widen)"
+                )
+                marg_A0 = posterior.sum(axis=(1, 2))
+                marg_t12 = posterior.sum(axis=(0, 2))
+                marg_B = posterior.sum(axis=(0, 1))
+                break
 
     dA0, dT12, dB = AA - A0_final, TT - t12_final, BB - B_final
     cov = np.empty((3, 3))
@@ -385,13 +478,29 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
             out[sl] = tmp
         return out
 
+    # Regularize JUST the IS proposal's covariance, not the reported `cov`: when a
+    # parameter (background, almost always) is resolved extremely tightly -- e.g.
+    # the sub-microcps precision reachable at very high statistics -- `cov` can be
+    # ill-conditioned enough (a near-zero eigenvalue next to a much larger one)
+    # that both sampling and the proposal's log-density evaluation lose precision
+    # in that eigendirection, occasionally underflowing to -inf for samples that
+    # are genuinely near the mode and producing `-inf - (-inf) = nan` importance
+    # weights -- which silently corrupts the weighted quantiles (a credible
+    # interval that doesn't even bracket the point estimate), not just a cosmetic
+    # warning. Flooring the smallest eigenvalue relative to the largest keeps the
+    # proposal's shape (and its sampling/logpdf consistency) numerically sound
+    # while barely widening it.
+    eigval, eigvec = np.linalg.eigh(cov)
+    eigval_floored = np.maximum(eigval, 1e-8 * eigval[-1])
+    cov_is = (eigvec * eigval_floored) @ eigvec.T
+
     rng = np.random.default_rng()
     mean_vec = np.array([A0_final, t12_final, B_final])
-    is_samples = rng.multivariate_normal(mean_vec, cov, size=config.n_is_samples)
+    is_samples = rng.multivariate_normal(mean_vec, cov_is, size=config.n_is_samples)
     A0_s, t12_s, B_s = is_samples[:, 0], is_samples[:, 1], is_samples[:, 2]
 
     log_w = log_posterior_batch(A0_s, t12_s, B_s) - multivariate_normal(
-        mean=mean_vec, cov=cov, allow_singular=True
+        mean=mean_vec, cov=cov_is, allow_singular=True
     ).logpdf(is_samples)
     finite = np.isfinite(log_w)
     log_w[~finite] = -np.inf
@@ -399,13 +508,54 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
     weights = np.where(finite, np.exp(log_w), 0.0)
     weights /= weights.sum()
 
-    A0_lo, A0_hi = _weighted_quantile(A0_s, weights, [0.001, 0.999])
-    t12_lo, t12_hi = _weighted_quantile(t12_s, weights, [0.001, 0.999])
-    B_lo, B_hi = _weighted_quantile(B_s, weights, [0.001, 0.999])
-    n_plot = 200
-    plot_A0_grid = np.linspace(max(0.0, A0_lo), A0_hi, n_plot)
-    plot_t12_grid = np.linspace(max(1e-6, t12_lo), t12_hi, n_plot)
-    plot_B_grid = np.linspace(max(0.0, B_lo), B_hi, n_plot)
+    # Effective sample size (Kish's ESS, 1/sum(w^2) for normalized weights): how many
+    # of the n_is_samples draws are actually carrying the reweighting, as opposed to
+    # a handful dominating while the rest contribute ~0. IS in 3D against a proposal
+    # this precisely targeted can degenerate badly once the posterior itself gets
+    # very tight/ill-conditioned (very high statistics): a single lucky draw can end
+    # up with nearly all the weight, making the "smoothed" quantiles/marginals built
+    # from it noise rather than a real description of the posterior -- in one
+    # observed case, a 95% CI that didn't even bracket the MAP point estimate.
+    #
+    # That same regime (tight, well-behaved likelihood, huge counts) is exactly
+    # where asymptotic normality (Bernstein-von Mises) makes the local grid's own
+    # Gaussian second-moment `cov` an accurate description on its own -- so when IS
+    # has collapsed, fall back to it directly instead of reporting quantiles built
+    # from a degenerate weighted sample.
+    ess = 1.0 / np.sum(weights**2)
+    is_degenerate = ess < max(0.01 * config.n_is_samples, 20)
+
+    if is_degenerate:
+        z = 1.9599639845400545  # norm.ppf(0.975)
+
+        def _gaussian_marginal(mean, sigma, floor=None, n=200, n_sigma=4.0):
+            lo = mean - n_sigma * sigma
+            if floor is not None:
+                lo = max(lo, floor)
+            grid = np.linspace(lo, mean + n_sigma * sigma, n)
+            return grid, norm.pdf(grid, mean, sigma)
+
+        sigma_A0, sigma_t12, sigma_B = np.sqrt(np.diag(cov))
+        plot_A0_grid, A0_marginal = _gaussian_marginal(A0_final, sigma_A0, floor=0.0)
+        plot_t12_grid, half_life_marginal = _gaussian_marginal(t12_final, sigma_t12, floor=1e-6)
+        plot_B_grid, background_marginal = _gaussian_marginal(B_final, sigma_B, floor=0.0)
+        A0_ci95 = (A0_final - z * sigma_A0, A0_final + z * sigma_A0)
+        half_life_ci95 = (t12_final - z * sigma_t12, t12_final + z * sigma_t12)
+        background_ci95 = (max(0.0, B_final - z * sigma_B), B_final + z * sigma_B)
+    else:
+        A0_lo, A0_hi = _weighted_quantile(A0_s, weights, [0.001, 0.999])
+        t12_lo, t12_hi = _weighted_quantile(t12_s, weights, [0.001, 0.999])
+        B_lo, B_hi = _weighted_quantile(B_s, weights, [0.001, 0.999])
+        n_plot = 200
+        plot_A0_grid = np.linspace(max(0.0, A0_lo), A0_hi, n_plot)
+        plot_t12_grid = np.linspace(max(1e-6, t12_lo), t12_hi, n_plot)
+        plot_B_grid = np.linspace(max(0.0, B_lo), B_hi, n_plot)
+        A0_marginal = _weighted_marginal(A0_s, plot_A0_grid, weights)
+        half_life_marginal = _weighted_marginal(t12_s, plot_t12_grid, weights)
+        background_marginal = _weighted_marginal(B_s, plot_B_grid, weights)
+        A0_ci95 = tuple(_weighted_quantile(A0_s, weights, [0.025, 0.975]))
+        half_life_ci95 = tuple(_weighted_quantile(t12_s, weights, [0.025, 0.975]))
+        background_ci95 = tuple(_weighted_quantile(B_s, weights, [0.025, 0.975]))
 
     return FitResult(
         t_start=t_start, t_end=t_end, bin_width=bin_width, counts=counts,
@@ -414,11 +564,9 @@ def fit(bin_edges, counts, tau_d, config=None, show_progress=True):
         A0=A0_final, half_life=t12_final, background=B_final, cov=cov, corr=corr,
         trace_t=np.array(trace_t), trace_A0=np.array(trace_A0),
         trace_half_life=np.array(trace_t12), trace_background=np.array(trace_B),
-        A0_grid=plot_A0_grid, A0_marginal=_weighted_marginal(A0_s, plot_A0_grid, weights),
-        half_life_grid=plot_t12_grid, half_life_marginal=_weighted_marginal(t12_s, plot_t12_grid, weights),
-        background_grid=plot_B_grid, background_marginal=_weighted_marginal(B_s, plot_B_grid, weights),
-        A0_ci95=tuple(_weighted_quantile(A0_s, weights, [0.025, 0.975])),
-        half_life_ci95=tuple(_weighted_quantile(t12_s, weights, [0.025, 0.975])),
-        background_ci95=tuple(_weighted_quantile(B_s, weights, [0.025, 0.975])),
+        A0_grid=plot_A0_grid, A0_marginal=A0_marginal,
+        half_life_grid=plot_t12_grid, half_life_marginal=half_life_marginal,
+        background_grid=plot_B_grid, background_marginal=background_marginal,
+        A0_ci95=A0_ci95, half_life_ci95=half_life_ci95, background_ci95=background_ci95,
         converged=converged, dead_time_model=config.dead_time_model,
     )
