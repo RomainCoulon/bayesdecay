@@ -12,6 +12,7 @@ from .model import (
     expected_counts,
     expected_observed_counts,
     loglinear_fit,
+    nonlinear_fit,
     simulate_binned,
 )
 from .priors import Priors, log_prior_background, log_prior_gaussian, log_prior_student_t
@@ -35,6 +36,7 @@ __all__ = [
     "expected_counts",
     "expected_observed_counts",
     "loglinear_fit",
+    "nonlinear_fit",
     "simulate_binned",
     "Priors",
     "log_prior_background",

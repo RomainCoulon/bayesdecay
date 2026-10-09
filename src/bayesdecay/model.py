@@ -1,8 +1,9 @@
-"""Decay-curve model, data simulation, and the classical log-linear reference fit."""
+"""Decay-curve model, data simulation, and the classical reference fits."""
 
 from __future__ import annotations
 
 import numpy as np
+from scipy.optimize import curve_fit
 
 from .deadtime import apply_deadtime, invert_deadtime, rate_transform
 
@@ -146,6 +147,80 @@ def loglinear_fit(t_c, c, w, t_max_fallback, tau_d=0.0, dead_time_model="nonpara
     sigma_half_life = (np.log(2) / lam_hat**2) * sigma_slope
     sigma_a0 = a0_hat * sigma_intercept
     return a0_hat, half_life_hat, 0.0, sigma_a0, sigma_half_life
+
+
+def nonlinear_fit(t_c, c, w, t_max_fallback, tau_d=0.0, dead_time_model="nonparalyzable"):
+    """Weighted nonlinear least-squares fit of ``A0 * exp(-lambda * t) + B`` directly
+    to the per-channel rate -- unlike :func:`loglinear_fit`, this DOES estimate
+    background, since the model is fit without first taking log() of it:
+    ``log(A0 * exp(-lam * t) + B)`` isn't linear in ``t``, which is exactly why a
+    log-linear regression can't include a nonzero ``B`` at all.
+
+    Channels are weighted by their Poisson standard error (``sqrt(counts) / width``)
+    -- the standard classical improvement over an unweighted fit: it keeps a sparse
+    late-time channel from being treated as just as informative as a high-count
+    early one. This is a Gaussian (least-squares) approximation to the Poisson
+    likelihood, valid once counts/channel aren't tiny -- not an exact treatment of
+    it. The Bayesian MAP estimator (:mod:`bayesdecay.fit`) uses the exact Poisson
+    likelihood instead, which is the main thing left to compare the two on.
+
+    Dead time is handled the same way as :func:`loglinear_fit`: the observed rate is
+    first corrected to an estimated TRUE rate via
+    :func:`bayesdecay.deadtime.invert_deadtime` (if ``tau_d > 0``), then the
+    exponential-plus-constant model above is fit to that corrected rate -- rather
+    than fitting a fully dead-time-aware nonlinear model directly. That keeps this a
+    direct, like-for-like upgrade of ``loglinear_fit`` (same dead-time treatment,
+    better background handling), not a reimplementation of the Bayesian estimator's
+    full likelihood.
+
+    Falls back to :func:`loglinear_fit`'s ``(A0, half_life)`` (with ``B`` forced to
+    0) if there aren't enough valid channels to fit 3 parameters, or if the
+    nonlinear solver fails to converge.
+
+    Returns
+    -------
+    A0_hat, half_life_hat, B_hat, sigma_A0, sigma_half_life, sigma_B
+    """
+    rate = c / w
+    if tau_d > 0:
+        rate = invert_deadtime(rate, tau_d, model=dead_time_model)
+    valid = (c > 0) & np.isfinite(rate) & (rate > 0)
+
+    def _fallback():
+        a0_hat, half_life_hat, _, sigma_a0, sigma_half_life = loglinear_fit(
+            t_c, c, w, t_max_fallback, tau_d=tau_d, dead_time_model=dead_time_model
+        )
+        return a0_hat, half_life_hat, 0.0, sigma_a0, sigma_half_life, 0.0
+
+    if valid.sum() < 4:
+        return _fallback()
+
+    t_v = t_c[valid]
+    rate_v = rate[valid]
+    sigma_v = np.sqrt(np.maximum(c[valid], 1.0)) / w[valid]
+
+    a0_0, t12_0, _, _, _ = loglinear_fit(
+        t_c, c, w, t_max_fallback, tau_d=tau_d, dead_time_model=dead_time_model
+    )
+    lam_0 = np.log(2) / t12_0
+
+    def _rate_model(t, A0, lam, B):
+        return A0 * np.exp(-lam * t) + B
+
+    try:
+        popt, pcov = curve_fit(
+            _rate_model, t_v, rate_v, p0=[a0_0, lam_0, 0.0], sigma=sigma_v, absolute_sigma=True,
+            bounds=([0.0, 1e-12, 0.0], [np.inf, np.inf, np.inf]), maxfev=20000,
+        )
+    except RuntimeError:
+        return _fallback()
+
+    a0_hat, lam_hat, b_hat = popt
+    sigma_a0, sigma_lam, sigma_b = np.sqrt(np.diag(pcov))
+    half_life_hat = np.log(2) / lam_hat
+    # Delta method: half_life = ln2/lam.
+    sigma_half_life = (np.log(2) / lam_hat**2) * sigma_lam
+    return a0_hat, half_life_hat, b_hat, sigma_a0, sigma_half_life, sigma_b
 
 
 def auto_bin_count(

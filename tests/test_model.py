@@ -2,7 +2,13 @@ import numpy as np
 import pytest
 
 from bayesdecay.deadtime import apply_deadtime, rate_transform
-from bayesdecay.model import expected_counts, expected_observed_counts, loglinear_fit, simulate_binned
+from bayesdecay.model import (
+    expected_counts,
+    expected_observed_counts,
+    loglinear_fit,
+    nonlinear_fit,
+    simulate_binned,
+)
 
 
 def test_expected_counts_matches_numerical_integration():
@@ -81,6 +87,73 @@ def test_loglinear_fit_dead_time_correction_removes_bias(dead_time_model):
     assert t12_corrected == pytest.approx(half_life, rel=1e-3)
     assert abs(A0_corrected - A0) < abs(A0_uncorrected - A0)
     assert abs(t12_corrected - half_life) < abs(t12_uncorrected - half_life)
+
+
+def test_nonlinear_fit_recovers_known_parameters_with_background_without_noise():
+    # Unlike loglinear_fit, nonlinear_fit should recover a NONZERO background
+    # almost exactly on noise-free data -- the whole point of fitting
+    # A0*exp(-lam*t)+B directly instead of log-linearizing it away.
+    A0, half_life, B = 3000.0, 40.0, 5.0
+    lam = np.log(2) / half_life
+    edges = np.linspace(0.0, 400.0, 201)
+    t_start, t_end = edges[:-1], edges[1:]
+    width = t_end - t_start
+    centers = 0.5 * (t_start + t_end)
+    counts = expected_counts(A0, lam, B, t_start, t_end)
+
+    A0_hat, half_life_hat, B_hat, sigma_A0, sigma_t12, sigma_B = nonlinear_fit(
+        centers, counts, width, 400.0
+    )
+
+    assert A0_hat == pytest.approx(A0, rel=1e-3)
+    assert half_life_hat == pytest.approx(half_life, rel=1e-3)
+    assert B_hat == pytest.approx(B, rel=1e-2)
+    assert sigma_A0 >= 0 and sigma_t12 >= 0 and sigma_B >= 0
+
+
+def test_nonlinear_fit_less_biased_than_loglinear_fit_with_background():
+    # With a non-negligible, non-zero background, loglinear_fit (which always
+    # treats B as exactly 0) should be noticeably biased, while nonlinear_fit
+    # (which estimates B) should recover A0/half_life much more accurately.
+    rng = np.random.default_rng(5)
+    A0, half_life, B, tau_d = 4000.0, 60.0, 40.0, 1e-6
+    t_max = 10 * half_life  # long enough that the decayed signal is well below B
+    lam = np.log(2) / half_life
+    n_bins = 400
+
+    bin_edges, counts = simulate_binned(A0, lam, B, t_max, tau_d, n_bins, rng=rng)
+    t_start, t_end = bin_edges[:-1], bin_edges[1:]
+    width = t_end - t_start
+    centers = 0.5 * (t_start + t_end)
+
+    A0_ll, t12_ll, *_ = loglinear_fit(centers, counts, width, t_max, tau_d=tau_d)
+    A0_nl, t12_nl, B_nl, *_ = nonlinear_fit(centers, counts, width, t_max, tau_d=tau_d)
+
+    assert abs(A0_nl - A0) < abs(A0_ll - A0)
+    assert abs(t12_nl - half_life) < abs(t12_ll - half_life)
+    assert B_nl == pytest.approx(B, rel=0.2)
+
+
+@pytest.mark.parametrize("dead_time_model", ["nonparalyzable", "paralyzable"])
+def test_nonlinear_fit_dead_time_correction_removes_bias(dead_time_model):
+    A0, half_life, tau_d = 50_000.0, 20.0, 20e-6
+    lam = np.log(2) / half_life
+    edges = np.linspace(0.0, 200.0, 401)
+    t_start, t_end = edges[:-1], edges[1:]
+    width = t_end - t_start
+    centers = 0.5 * (t_start + t_end)
+
+    true_counts = expected_counts(A0, lam, 0.0, t_start, t_end)
+    observed_counts = apply_deadtime(true_counts, width, tau_d, model=dead_time_model)
+
+    A0_uncorrected, t12_uncorrected, *_ = nonlinear_fit(centers, observed_counts, width, 200.0)
+    A0_corrected, t12_corrected, *_ = nonlinear_fit(
+        centers, observed_counts, width, 200.0, tau_d=tau_d, dead_time_model=dead_time_model
+    )
+
+    assert A0_uncorrected < 0.95 * A0
+    assert A0_corrected == pytest.approx(A0, rel=1e-2)
+    assert t12_corrected == pytest.approx(half_life, rel=1e-2)
 
 
 def test_expected_observed_counts_n_quad_1_matches_apply_deadtime_exactly():
